@@ -34,24 +34,40 @@ class DecisionLogger:
         questions_asked: Any,
         probabilities_returned: Dict[str, float],
         chosen_action: str,
+        compressed_state: Optional[str] = None,
+        expected_values: Optional[Dict[str, float]] = None,
+        expected_value: Optional[float] = None,
+        adaptive_warning: Optional[str] = None,
     ) -> bool:
         """Append a decision record to the JSONL log file.
 
         Args:
-            game_state: Snapshot of the game state before taking action.
-            questions_asked: Formulated questions or prompt representation sent to Laya.
+            game_state: Snapshot of the raw game state before taking action.
+            questions_asked: Formulated questions sent to Laya.
             probabilities_returned: Calibrated probabilities dictionary returned by Laya.
             chosen_action: The selected action dispatched to the game.
+            compressed_state: Feature-engineered dense state string (Feature 1).
+            expected_values: Dict mapping actions to their computed Expected Value scores (Feature 3).
+            expected_value: Expected Value score of the chosen action (Feature 3).
+            adaptive_warning: Failure warning appended to prompt if applicable (Feature 4).
 
         Returns:
             True if write succeeded, False otherwise.
         """
+        # Derive chosen action's expected value if not explicitly passed
+        if expected_value is None and expected_values and chosen_action in expected_values:
+            expected_value = expected_values[chosen_action]
+
         record: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "game_state": game_state,
+            "compressed_state": compressed_state,
             "questions_asked": questions_asked,
             "probabilities_returned": probabilities_returned,
+            "expected_values": expected_values or {},
+            "expected_value": expected_value,
             "chosen_action": chosen_action,
+            "adaptive_warning": adaptive_warning,
         }
 
         try:

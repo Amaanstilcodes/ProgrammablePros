@@ -104,13 +104,17 @@ def main() -> None:
     latest = records[-1]
     latest_state = latest.get("game_state", {})
     latest_probs = latest.get("probabilities_returned", {})
+    latest_evs = latest.get("expected_values", {})
+    latest_ev = latest.get("expected_value")
     latest_action = latest.get("chosen_action", "N/A")
+    latest_compressed = latest.get("compressed_state", "N/A")
+    latest_warning = latest.get("adaptive_warning")
     player_pos = latest_state.get("player_pos", 0)
     goal_pos = latest_state.get("goal_pos", 10)
     game_status = latest_state.get("status", "IN_PROGRESS")
 
-    # Top Level KPI Metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Top Level KPI Metrics (5 columns)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Total Decisions Logged", len(records))
     with col2:
@@ -118,8 +122,18 @@ def main() -> None:
     with col3:
         st.metric("Latest Chosen Move", latest_action.upper())
     with col4:
+        ev_display = f"{latest_ev:+.2f}" if latest_ev is not None else "N/A"
+        st.metric("Expected Value (EV)", ev_display)
+    with col5:
         status_color = "🟢" if game_status == "WON" else ("🟡" if game_status == "IN_PROGRESS" else "🔴")
         st.metric("Game Status", f"{status_color} {game_status}")
+
+    # Feature 4 Alert: Adaptive Warning Callout
+    if latest_warning:
+        st.warning(f"⚠️ **Failure-Adaptive Warning Triggered:** {latest_warning}")
+
+    # Feature 1 Context: Compressed State Display
+    st.info(f"🧬 **Feature 1 — Compressed State Context:** `{latest_compressed}`")
 
     # Goal Progress Bar
     progress_val = min(1.0, max(0.0, player_pos / goal_pos if goal_pos > 0 else 0.0))
@@ -128,18 +142,19 @@ def main() -> None:
     st.divider()
 
     # Active Decision Inspection
-    st.subheader("🎯 Latest Evaluated Move")
+    st.subheader("🎯 Latest Evaluated Move (Probabilities vs Expected Values)")
     col_probs, col_context = st.columns([1, 1])
 
     with col_probs:
-        st.markdown("**Calibrated Probabilities by Action:**")
-        # Display as metric bars
+        st.markdown("**Calibrated Probabilities & EV Scores:**")
         for action, prob in latest_probs.items():
-            st.write(f"**Action `{action}`**: {prob:.1%}")
-            st.progress(float(prob))
+            ev_score = latest_evs.get(action)
+            ev_str = f" | EV: **{ev_score:+.2f}**" if ev_score is not None else ""
+            st.write(f"**Action `{action}`**: {prob:.1%}{ev_str}")
+            st.progress(min(1.0, max(0.0, float(prob))))
 
     with col_context:
-        st.markdown("**Questions Evaluated by Laya:**")
+        st.markdown("**Typed Hypothesis Questions Evaluated by Laya:**")
         questions = latest.get("questions_asked", {})
         if isinstance(questions, dict):
             for act, q in questions.items():
@@ -161,18 +176,31 @@ def main() -> None:
         action = item.get("chosen_action", "N/A")
         ts = item.get("timestamp", "")
         probs = item.get("probabilities_returned", {})
+        evs = item.get("expected_values", {})
+        chosen_ev_item = item.get("expected_value")
+        warning_item = item.get("adaptive_warning")
+        compressed_item = item.get("compressed_state", "N/A")
         state = item.get("game_state", {})
 
         prob_summary = " | ".join(f"{a}: {p:.1%}" for a, p in probs.items())
+        ev_summary = " | ".join(f"{a}: {e:+.2f}" for a, e in evs.items()) if evs else ""
         badge_class = "action-right" if action.lower() == "right" else "action-left"
+        warning_badge = " ⚠️ [ADAPTED]" if warning_item else ""
 
-        with st.expander(f"Step {step_num:02d} — Action: [{action.upper()}] — {ts}"):
+        with st.expander(f"Step {step_num:02d} — Action: [{action.upper()}]{warning_badge} — EV: {chosen_ev_item:+.2f} — {ts}"):
             st.markdown(
                 f"<span class='action-badge {badge_class}'>Action: {action}</span> "
+                f"&nbsp;&nbsp; **EV:** `{chosen_ev_item:+.2f}` "
                 f"&nbsp;&nbsp; **Probabilities:** `{prob_summary}`",
                 unsafe_allow_html=True,
             )
+            if ev_summary:
+                st.caption(f"Action Expected Values: {ev_summary}")
+            st.markdown(f"**Compressed State:** `{compressed_item}`")
             st.markdown(f"**Position at Decision:** `{state.get('player_pos', 'N/A')}` / `{state.get('goal_pos', 'N/A')}`")
+
+            if warning_item:
+                st.markdown(f"**Memory Warning Active:** `{warning_item}`")
 
             col_q, col_raw = st.columns(2)
             with col_q:
