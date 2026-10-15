@@ -9,8 +9,9 @@ Implements:
 4. Feature 4: Failure-Adaptive Prompting (Short-Term Memory)
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import random
+import os
 
 
 class LayaAgent:
@@ -76,6 +77,9 @@ class LayaAgent:
     ) -> None:
         """Record an action outcome in short-term memory (Feature 4).
 
+        Strategy 4: Keyed by (position, action) so a failure at one tile does NOT
+        wrongly suppress the same action at a different position.
+
         Args:
             action: Action executed.
             prev_state: State before action execution.
@@ -83,9 +87,10 @@ class LayaAgent:
             success: Whether the action achieved forward progress toward the goal.
             details: Human-readable diagnostic description of the transition.
         """
+        prev_pos = prev_state.get("player_pos", 0)
         outcome: Dict[str, Any] = {
             "action": action,
-            "prev_pos": prev_state.get("player_pos", 0),
+            "prev_pos": prev_pos,
             "new_pos": new_state.get("player_pos", 0),
             "success": success,
             "details": details,
@@ -95,17 +100,32 @@ class LayaAgent:
         if len(self.recent_outcomes) > self.max_memory_turns:
             self.recent_outcomes.pop(0)
 
-    def did_action_recently_fail(self, action: str) -> bool:
+    def did_action_recently_fail(
+        self, action: str, current_pos: Any = None
+    ) -> bool:
         """Check if an action resulted in a failure within recent memory window.
+
+        Strategy 4: When current_pos is provided (2-D Vault game), failure check is
+        keyed by (position, action) so a hidden-wall at (3,2) does NOT suppress
+        the same direction elsewhere on the grid.
 
         Args:
             action: Candidate action string to check.
+            current_pos: Optional player position for position-scoped failure lookup.
 
         Returns:
-            True if action failed in recent outcomes, False otherwise.
+            True if action failed in recent outcomes (at this position), False otherwise.
         """
         for outcome in reversed(self.recent_outcomes):
-            if outcome.get("action") == action and not outcome.get("success", True):
+            if outcome.get("action") != action:
+                continue
+            if outcome.get("success", True):
+                continue
+            if current_pos is not None:
+                # Position-scoped failure check (Strategy 4 for grid games)
+                if outcome.get("prev_pos") == current_pos:
+                    return True
+            else:
                 return True
         return False
 
@@ -116,34 +136,54 @@ class LayaAgent:
         self.last_warnings.clear()
         self.last_compressed_state = ""
 
-    def formulate_questions(self, state: Dict[str, Any], possible_actions: List[str]) -> Dict[str, str]:
+    def formulate_questions(
+        self,
+        state: Dict[str, Any],
+        possible_actions: List[str],
+        goal_phrase: str = "the goal",
+        compressed_state_override: Optional[str] = None,
+    ) -> Dict[str, str]:
         """Convert compressed state and actions into typed, hypothesis-driven questions (Feature 2 & 4).
 
-        Frames binary, testable hypotheses for probability calibration:
-        "Context: {compressed_state}. Hypothesis: Executing action '{action}' will successfully progress toward the goal. What is the calibrated probability (0.0 to 1.0) that this hypothesis is true?"
-        Appends failure-adaptive warnings if the action recently failed.
+        Strategy 2: goal_phrase parameter (default='the goal') lets Vault Runner
+        inject a richer objective description without changing the original game.
+
+        Frames binary, testable hypotheses:
+        "Context: {compressed_state}. Hypothesis: Executing action '{action}' will
+        successfully progress toward {goal_phrase} without being caught or hitting a
+        hazard. What is the calibrated probability (0.0 to 1.0) that this is true?"
+
+        Appends failure-adaptive warnings if the action recently failed at this position.
 
         Args:
             state: Current game state dictionary.
             possible_actions: List of valid candidate actions.
+            goal_phrase: Goal description injected into hypothesis text (Strategy 2).
+            compressed_state_override: Pre-computed compressed string (skips compress_state).
 
         Returns:
             Dict mapping action to its formulated typed question.
         """
-        compressed = self.compress_state(state)
+        if compressed_state_override is not None:
+            compressed = compressed_state_override
+        else:
+            compressed = self.compress_state(state)
         self.last_compressed_state = compressed
         self.last_warnings = {}
+
+        current_pos = state.get("player_pos")  # None for 1-D game (unchanged behaviour)
 
         questions: Dict[str, str] = {}
         for action in possible_actions:
             question = (
                 f"Context: {compressed}. "
-                f"Hypothesis: Executing action '{action}' will successfully progress toward the goal. "
+                f"Hypothesis: Executing action '{action}' will successfully progress toward "
+                f"{goal_phrase} without being caught or hitting a hazard. "
                 f"What is the calibrated probability (0.0 to 1.0) that this hypothesis is true?"
             )
 
-            # Feature 4: Failure-Adaptive Prompting
-            if self.did_action_recently_fail(action):
+            # Feature 4: Failure-Adaptive Prompting (position-scoped for grid games)
+            if self.did_action_recently_fail(action, current_pos=current_pos):
                 warning = (
                     f"WARNING: In the previous turn, taking action '{action}' resulted in no progress. "
                     f"Adjust probability accordingly."
@@ -161,42 +201,69 @@ class LayaAgent:
         probabilities: Dict[str, float],
         reward: float = 10.0,
         penalty: float = 5.0,
+        payoffs: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> Dict[str, float]:
         """Compute Expected Value (EV) for each candidate action (Feature 3).
 
-        EV = (Probability_of_Success * Reward) - (Probability_of_Failure * Penalty)
-        where Probability_of_Failure = 1.0 - Probability_of_Success.
+        EV = (P_success * Reward) - (P_failure * |Penalty|)
+
+        Strategy 3: Optional `payoffs` dict maps action -> (reward, abs_penalty) for
+        asymmetric per-action risk/reward (e.g. SPRINT vs WAIT in Vault Runner).
+        When payoffs is None the global reward/penalty are used and the original
+        game behaves exactly as before.
 
         Args:
             probabilities: Calibrated success probabilities per action.
-            reward: Payoff value for successful progress (default: +10.0).
-            penalty: Penalty score for failed move or wasted turn (default: 5.0).
+            reward: Global payoff value (default: +10.0, used when payoffs=None).
+            penalty: Global penalty score (default: 5.0, used when payoffs=None).
+            payoffs: Optional per-action (reward, abs_penalty) overrides (Strategy 3).
 
         Returns:
             Dict mapping action to its calculated expected value score.
         """
         ev_scores: Dict[str, float] = {}
         for action, p_success in probabilities.items():
+            if payoffs and action in payoffs:
+                r, p = payoffs[action]   # Strategy 3: asymmetric payoff
+            else:
+                r, p = reward, penalty
             p_failure = max(0.0, 1.0 - p_success)
-            ev = (p_success * reward) - (p_failure * penalty)
+            ev = (p_success * r) - (p_failure * p)
             ev_scores[action] = round(ev, 3)
         return ev_scores
 
-    def decide(self, state: Dict[str, Any], possible_actions: List[str]) -> Dict[str, float]:
+    def decide(
+        self,
+        state: Dict[str, Any],
+        possible_actions: List[str],
+        goal_phrase: str = "the goal",
+        compressed_state_override: Optional[str] = None,
+    ) -> Dict[str, float]:
         """Evaluate candidate actions and return calibrated probabilities.
 
         Args:
             state: Current game state dictionary.
             possible_actions: List of valid candidate action strings.
+            goal_phrase: Passed through to formulate_questions (Strategy 2).
+            compressed_state_override: Pre-computed compressed string (Strategy 1).
 
         Returns:
             Dict mapping each candidate action to its calibrated success probability.
         """
         # 1. Formulate hypothesis questions with state compression & failure warnings
-        self.last_questions = self.formulate_questions(state, possible_actions)
+        self.last_questions = self.formulate_questions(
+            state,
+            possible_actions,
+            goal_phrase=goal_phrase,
+            compressed_state_override=compressed_state_override,
+        )
 
         # 2. Query model (Mock or Real Laya API)
         if self.use_mock:
+            # Route to game-specific mock heuristic based on game_type field
+            game_type = state.get("game_type", "CLASSIC")
+            if game_type == "VAULT_RUNNER":
+                return self._mock_vault_eval(state, possible_actions)
             return self._mock_laya_eval(state, possible_actions)
 
         # -------------------------------------------------------------------------
@@ -248,6 +315,94 @@ class LayaAgent:
                 raw_scores[action] = round(random.uniform(0.05, 0.30), 3)
             else:
                 raw_scores[action] = round(random.uniform(0.10, 0.45), 3)
+
+        return raw_scores
+
+    def _mock_vault_eval(
+        self, state: Dict[str, Any], possible_actions: List[str]
+    ) -> Dict[str, float]:
+        """Simulate calibrated probabilities for Vault Runner (offline/mock mode).
+
+        Heuristic rules (Strategy 1 compressed fields drive the scoring):
+        - Actions that reduce obj_dist get high P (0.60-0.90).
+        - Actions toward a laser/guard get penalised P (0.15-0.35).
+        - Actions in last_warnings (Strategy 4) get strongly suppressed (x0.15).
+        - Small seeded noise added; all values clipped to [0.02, 0.98].
+        """
+        from vault_game import DIRECTION_DELTA, TILE_LASER, _manhattan  # local import
+
+        px, py = state.get("player_pos", (0, 0))
+        keys_held = state.get("keys_held", 0)
+        guard_pos = state.get("guard_pos", (-1, -1))
+        guard_next = state.get("guard_next_pos", (-1, -1))
+        vgrid = state.get("visible_grid", [])
+
+        # Determine current objective position
+        if keys_held == 0:
+            obj_pos = state.get("key_pos")
+        else:
+            obj_pos = state.get("goal_pos")
+
+        raw_scores: Dict[str, float] = {}
+
+        for action in possible_actions:
+            has_warning = action in self.last_warnings
+
+            if has_warning:
+                # Strategy 4: suppress probability strongly when WARNING is active
+                base = random.uniform(0.04, 0.14)
+                raw_scores[action] = round(max(0.02, min(0.98, base)), 3)
+                continue
+
+            action_lc = action.strip().lower()
+
+            if action_lc == "wait":
+                base = random.uniform(0.30, 0.50)
+
+            elif action_lc == "sprint":
+                facing = state.get("facing", "right")
+                if facing in DIRECTION_DELTA:
+                    dx, dy = DIRECTION_DELTA[facing]
+                    t1x, t1y = px + dx, py + dy
+                    t2x, t2y = px + dx * 2, py + dy * 2
+                    # Sprint toward objective => higher P
+                    if obj_pos and _manhattan((t2x, t2y), obj_pos) < _manhattan((px, py), obj_pos):
+                        base = random.uniform(0.65, 0.88)
+                    else:
+                        base = random.uniform(0.35, 0.60)
+                    # Laser at tile 1: sprint jumps it safely, slightly boosts P
+                    if vgrid and 0 <= t1x < len(vgrid[0]) if vgrid else False:
+                        if 0 <= t1y < len(vgrid) and vgrid[t1y][t1x] == TILE_LASER:
+                            base = min(0.98, base + 0.08)
+                else:
+                    base = random.uniform(0.30, 0.55)
+
+            elif action_lc in DIRECTION_DELTA:
+                dx, dy = DIRECTION_DELTA[action_lc]
+                nx, ny = px + dx, py + dy
+
+                # Guard adjacency: suppress strongly
+                if (nx, ny) == guard_pos or (nx, ny) == guard_next:
+                    base = random.uniform(0.05, 0.18)
+                # Laser adjacency: suppress
+                elif vgrid and 0 <= ny < len(vgrid) and 0 <= nx < len(vgrid[0] if vgrid else []):
+                    if vgrid[ny][nx] == TILE_LASER:
+                        base = random.uniform(0.15, 0.35)
+                    elif obj_pos and _manhattan((nx, ny), obj_pos) < _manhattan((px, py), obj_pos):
+                        # Advancing toward objective
+                        base = random.uniform(0.62, 0.92)
+                    else:
+                        base = random.uniform(0.10, 0.40)
+                elif obj_pos and _manhattan((nx, ny), obj_pos) < _manhattan((px, py), obj_pos):
+                    base = random.uniform(0.62, 0.92)
+                else:
+                    base = random.uniform(0.10, 0.40)
+            else:
+                base = random.uniform(0.20, 0.50)
+
+            # Small noise
+            noise = random.uniform(-0.03, 0.03)
+            raw_scores[action] = round(max(0.02, min(0.98, base + noise)), 3)
 
         return raw_scores
 

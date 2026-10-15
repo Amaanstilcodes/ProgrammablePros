@@ -12,6 +12,12 @@ from typing import Any, Dict, List
 
 import streamlit as st
 
+try:
+    import pandas as pd
+    _PANDAS_AVAILABLE = True
+except ImportError:
+    _PANDAS_AVAILABLE = False
+
 from logger import DecisionLogger
 
 
@@ -84,7 +90,7 @@ def main() -> None:
         st.rerun()
 
     # Main dashboard header
-    st.title("🤖 Laya Game Bot — Live Decision Viewer")
+    st.title("Laya Game Bot -- Live Decision Viewer")
     st.caption("Real-time telemetry and decision probability calibration stream")
 
     # Read records using DecisionLogger
@@ -109,6 +115,7 @@ def main() -> None:
     latest_action = latest.get("chosen_action", "N/A")
     latest_compressed = latest.get("compressed_state", "N/A")
     latest_warning = latest.get("adaptive_warning")
+    game_type = latest_state.get("game", latest_state.get("game_type", "classic"))
     player_pos = latest_state.get("player_pos", 0)
     goal_pos = latest_state.get("goal_pos", 10)
     game_status = latest_state.get("status", "IN_PROGRESS")
@@ -118,7 +125,12 @@ def main() -> None:
     with col1:
         st.metric("Total Decisions Logged", len(records))
     with col2:
-        st.metric("Player Position", f"{player_pos} / {goal_pos}")
+        # Support both 1-D int position (classic) and 2-D tuple (vault)
+        if isinstance(player_pos, (list, tuple)):
+            pos_str = f"({player_pos[0]},{player_pos[1]})"
+        else:
+            pos_str = f"{player_pos} / {goal_pos}"
+        st.metric("Player Position", pos_str)
     with col3:
         st.metric("Latest Chosen Move", latest_action.upper())
     with col4:
@@ -135,11 +147,48 @@ def main() -> None:
     # Feature 1 Context: Compressed State Display
     st.info(f"🧬 **Feature 1 — Compressed State Context:** `{latest_compressed}`")
 
-    # Goal Progress Bar
-    progress_val = min(1.0, max(0.0, player_pos / goal_pos if goal_pos > 0 else 0.0))
-    st.progress(progress_val, text=f"Progress to Goal: {player_pos}/{goal_pos} ({progress_val:.0%})")
+    # Game-type badge
+    if game_type in ("vault", "VAULT_RUNNER"):
+        st.caption("🏦 Game: **Vault Runner** (2-D Heist)")
+    else:
+        st.caption("🎮 Game: **Classic 1-D Grid Navigator**")
+
+    # Goal Progress Bar (works for both game types)
+    if isinstance(player_pos, (list, tuple)) and isinstance(goal_pos, (list, tuple)):
+        # Vault: show steps-based progress
+        steps_used = latest_state.get("steps_used", 0)
+        max_steps = latest_state.get("max_steps", 40)
+        progress_val = min(1.0, max(0.0, steps_used / max_steps if max_steps > 0 else 0.0))
+        st.progress(progress_val, text=f"Steps Used: {steps_used}/{max_steps} ({progress_val:.0%})")
+        # Keys held indicator
+        keys_held = latest_state.get("keys_held", 0)
+        st.caption(f"Keys held: {'🔑 YES' if keys_held else 'None'}")
+    else:
+        progress_val = min(1.0, max(0.0, player_pos / goal_pos if goal_pos > 0 else 0.0))
+        st.progress(progress_val, text=f"Progress to Goal: {player_pos}/{goal_pos} ({progress_val:.0%})")
 
     st.divider()
+
+    # ── Vault Runner Heatmap (only when running vault game) ───────
+    if game_type in ("vault", "VAULT_RUNNER") and _PANDAS_AVAILABLE:
+        st.subheader("🗺️ Agent Position Heatmap (Vault Runner)")
+        heat_data: Dict[str, Any] = {}
+        for rec in records:
+            pos = rec.get("game_state", {}).get("player_pos")
+            if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                key = f"{pos[0]},{pos[1]}"
+                heat_data[key] = heat_data.get(key, 0) + 1
+        if heat_data:
+            import json as _json
+            rows = []
+            for k, cnt in heat_data.items():
+                x, y = map(int, k.split(","))
+                rows.append({"x": x, "y": y, "visits": cnt})
+            df = pd.DataFrame(rows)
+            pivot = df.pivot_table(index="y", columns="x", values="visits", fill_value=0)
+            st.dataframe(pivot, use_container_width=True)
+            st.caption("Each cell = number of times the agent visited that grid coordinate.")
+        st.divider()
 
     # Active Decision Inspection
     st.subheader("🎯 Latest Evaluated Move (Probabilities vs Expected Values)")
@@ -201,6 +250,11 @@ def main() -> None:
 
             if warning_item:
                 st.markdown(f"**Memory Warning Active:** `{warning_item}`")
+
+            # Hidden wall discovery indicator (Vault only)
+            hw = item.get("game_state", {}).get("hidden_wall_discovered")
+            if hw:
+                st.markdown(f"**Hidden Wall Discovered at:** `{hw}` (triggers next-turn WARNING)")
 
             col_q, col_raw = st.columns(2)
             with col_q:
