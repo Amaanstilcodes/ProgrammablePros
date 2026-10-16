@@ -44,7 +44,7 @@ def run_orchestrated_game(
     game: str = "snake",
     api_key: str = "",
     agent_name: str = "ProgrammablePros",
-    is_mock: bool = True,
+    is_mock: bool = False,
     max_steps_override: int | None = None,
     allow_stage_override: bool = False,
     rejected_step_policy: str = "repeat_last_applied",
@@ -76,7 +76,7 @@ def run_orchestrated_game(
     )
     compliance = ComplianceLayer()
     ev_calc = AdvancedEVCalculator()
-    laya_backend: LayaBackend = MockLayaBackend()
+    laya_backend: LayaBackend = LocalLayaBackend()
 
     # 4. Start Game Session
     session_id, raw_state_before = bundle.client.start_game(agent_name)
