@@ -47,65 +47,81 @@ class ComplianceLayer:
 
     # ── Probability normalisation ─────────────────────────────────────────────
 
+    def normalize_laya_probabilities(
+        self,
+        primary_laya_probs: dict[str, float],
+        decimals: int = 6,
+    ) -> dict[str, float]:
+        """Normalize PRIMARY Laya hypothesis probabilities to sum to 1.000000 in [0.98, 1.02].
+
+        PDF §3.2 / Phase 3.2 Rules:
+        1. Input MUST be the PRIMARY Laya hypothesis probabilities per action,
+           never EV scores, never a blend, never a planner output.
+        2. Validate: exactly {up,down,left,right}, all finite, all in [0,1].
+        3. If already normalized (0.999 <= sum <= 1.001), use as-is after rounding.
+        4. Otherwise normalize: p_a / sum(p). If sum == 0: uniform 0.25.
+        5. Round each value to `decimals` (default 6).
+        6. Compute residual = 1.0 - sum(rounded) and add to LARGEST probability.
+        7. Re-clamp to [0, 1].
+        8. Assert 0.98 <= sum <= 1.02.
+        """
+        missing = set(DIRECTIONS) - set(primary_laya_probs.keys())
+        if missing:
+            raise ValueError(f"Primary Laya probabilities missing required directions: {missing}")
+
+        validated: dict[str, float] = {}
+        for d in DIRECTIONS:
+            val = float(primary_laya_probs[d])
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError(f"Non-finite probability for '{d}': {val}")
+            val = max(0.0, min(1.0, val))
+            validated[d] = val
+
+        raw_sum = sum(validated.values())
+
+        if 0.999 <= raw_sum <= 1.001:
+            probs = {d: validated[d] for d in DIRECTIONS}
+        elif raw_sum <= 1e-12:
+            probs = {d: 0.25 for d in DIRECTIONS}
+        else:
+            probs = {d: validated[d] / raw_sum for d in DIRECTIONS}
+
+        rounded = {d: round(probs[d], decimals) for d in DIRECTIONS}
+        residual = round(1.0 - sum(rounded.values()), decimals)
+        if abs(residual) > 1e-12:
+            dominant = max(rounded, key=lambda d: rounded[d])
+            rounded[dominant] = round(max(0.0, min(1.0, rounded[dominant] + residual)), decimals)
+
+        final_sum = round(sum(rounded.values()), decimals)
+        if abs(1.0 - final_sum) > 1e-6:
+            dominant = max(rounded, key=lambda d: rounded[d])
+            rounded[dominant] = round(max(0.0, min(1.0, rounded[dominant] + (1.0 - final_sum))), decimals)
+
+        total_sum = sum(rounded.values())
+        assert 0.98 <= total_sum <= 1.02, f"Probability sum {total_sum:.6f} outside [0.98, 1.02]"
+        return rounded
+
     def normalize_probabilities_for_log(
         self,
-        ev_scores_or_raw_probs: dict[str, Any],
+        scores_or_probs: dict[str, Any],
+        decimals: int = 6,
     ) -> dict[str, float]:
-        """Map internal action scores to exactly {up, down, left, right} summing to 1.000.
+        """Normalize primary probabilities or scores for logging."""
+        # If input looks like raw probabilities in [0, 1], normalize directly
+        first_val = next(iter(scores_or_probs.values()), 0.0)
+        if isinstance(first_val, (int, float)) and all(0.0 <= float(scores_or_probs.get(d, 0.0)) <= 1.0 for d in DIRECTIONS):
+            return self.normalize_laya_probabilities({d: float(scores_or_probs.get(d, 0.25)) for d in DIRECTIONS}, decimals)
 
-        Algorithm:
-        1. Extract a scalar value per direction from the input dict.
-           Accepts nested AdvancedEVCalculator dicts (using 'ev' key) or raw floats.
-        2. Apply softmax to convert arbitrary scores to a probability simplex.
-        3. Force-sum to exactly 1.000 by adjusting the highest-value direction
-           by the residual (sum - 1.000), guaranteeing sum ∈ [0.98, 1.02].
-
-        Args:
-            ev_scores_or_raw_probs: Dict mapping direction strings to either
-                float scores or nested dicts with an 'ev' key (AdvancedEVCalculator output).
-
-        Returns:
-            Dict with exactly four keys: "up", "down", "left", "right", values
-            summing to precisely 1.000 with no NaN/Infinity.
-        """
-        # 1. Extract scalar score per direction ─────────────────────────────
-        raw: dict[str, float] = {}
-        for direction in DIRECTIONS:
-            val = ev_scores_or_raw_probs.get(direction, 0.0)
-            if isinstance(val, dict):
-                # AdvancedEVCalculator format: {ev: float, p_legal: float, ...}
-                val = float(val.get("ev", val.get("p_subgoal", 0.0)))
-            raw[direction] = float(val)
-
-        # 2. Softmax for numerical stability ─────────────────────────────────
+        # Otherwise extract scalar and softmax (backward compat)
+        raw = {d: float(scores_or_probs.get(d, 0.0)) for d in DIRECTIONS}
         max_val = max(raw.values())
         exp_vals = {d: math.exp(raw[d] - max_val) for d in DIRECTIONS}
         total_exp = sum(exp_vals.values())
-
-        if total_exp == 0.0 or math.isnan(total_exp) or math.isinf(total_exp):
-            # Degenerate fallback: uniform distribution
+        if total_exp == 0.0 or math.isnan(total_exp):
             probs = {d: 0.25 for d in DIRECTIONS}
         else:
             probs = {d: exp_vals[d] / total_exp for d in DIRECTIONS}
-
-        # 3. Force exact sum to 1.000 ─────────────────────────────────────────
-        current_sum = sum(probs.values())
-        residual = current_sum - 1.0
-        if abs(residual) > 1e-10:
-            # Absorb residual into the highest-probability direction
-            dominant = max(probs, key=lambda d: probs[d])
-            probs[dominant] = probs[dominant] - residual
-
-        # 4. Clamp all values to [0.0, 1.0] to guard against floating-point drift
-        probs = {d: max(0.0, min(1.0, probs[d])) for d in DIRECTIONS}
-
-        # 5. Final guard: verify sum is in [0.98, 1.02]
-        final_sum = sum(probs.values())
-        assert 0.98 <= final_sum <= 1.02, (
-            f"Probability sum {final_sum:.6f} out of mandated [0.98, 1.02] window."
-        )
-
-        return {d: round(probs[d], 6) for d in DIRECTIONS}
+        return self.normalize_laya_probabilities(probs, decimals)
 
     # ── Snake safety / anti-reversal check ───────────────────────────────────
 

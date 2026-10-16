@@ -12,6 +12,7 @@ the official minimal log. Captures:
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,10 @@ class RichTraceLogger:
         if self._file_handle is None or self._file_handle.closed:
             self.open()
 
+        features_serializable: Any = features
+        if is_dataclass(features) and not isinstance(features, type):
+            features_serializable = asdict(features)
+
         record = {
             "session_id": self._session_id,
             "step": step,
@@ -65,13 +70,13 @@ class RichTraceLogger:
             "typed_probabilities": typed_probabilities,
             "anchor_probes": anchor_probes,
             "ev_breakdown": ev_breakdown,
-            "subgoal": str(subgoal),
-            "features": features,
+            "subgoal": asdict(subgoal) if (is_dataclass(subgoal) and not isinstance(subgoal, type)) else str(subgoal),
+            "features": features_serializable,
             "memory_delta": memory_delta or {},
             "calibration_drift": calibration_drift,
         }
 
-        self._file_handle.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
+        self._file_handle.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False, default=str) + "\n")
         self._file_handle.flush()
 
     def close(self) -> None:

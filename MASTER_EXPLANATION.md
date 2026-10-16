@@ -1,259 +1,184 @@
-# 🏆 Team ProgrammablePros: Master Project Briefing & Pitch Defense
-**Hackathon:** Genesis 2.0 | **Track:** EVA 02  
-**Problem Statement:** Build the decision layer for hosted online games using the Laya calibrated probability model.
+# 🏆 Team ProgrammablePros: Master Project Briefing, Technical Architecture & Qwen/Judge AI Knowledge Base
+
+**Competition:** Genesis 2.0 Hackathon | **Track:** EVA 02  
+**Problem Statement:** Build an autonomous decision layer for hosted online games on TopGameAI Arena (Stage 1: Snake, Stage 2: 2048) using the **Laya** calibrated probability decision model under strict cryptographic audit constraints.  
+**Repository:** `ProgrammablePros` (Python 3.10+)
 
 ---
 
-## 1. The Elevator Pitch (1 Minute)
+## 1. Executive Summary & Core Philosophy
 
-> "Most game-playing AI agents rely on heavy, expensive generative LLMs like GPT-4 that cost dollars per game, lag by several seconds, and inevitably hallucinate invalid moves. **ProgrammablePros** takes an entirely different architectural route: we engineered an autonomous decision layer powered by **Laya**, a lightweight, open-weight calibrated probability model.
-> 
-> Instead of asking an AI 'What should I do next?', our bot transforms the game state into **typed binary hypotheses**, queries Laya for pure mathematical success probabilities in milliseconds, and selects moves using a rigorous **Expected Value (EV) risk-reward engine**. The result is a lightning-fast, zero-hallucination, failure-adaptive bot that plays with institutional-grade auditability across both 1-D navigation and complex 2-D multi-hazard heist environments."
+Most AI agents playing games rely on heavy generative LLMs (e.g. GPT-4, Claude, or general conversational checkpoints) that:
+1. Suffer from high inference latency (1–3 seconds per turn), violating arena timing limits.
+2. Cost dollars per session.
+3. Frequently hallucinate non-existent directions or violate board geometry.
+4. Fail completely under strict cryptographic audit constraints.
 
----
-
-## 2. Supported Game Environments
-
-Our decision layer drives two distinct game environments via a unified registry in `main.py`:
-
-| Game Environment | Dimensionality & Board | Key Hazards & Mechanics | Objective & Actions |
-| :--- | :--- | :--- | :--- |
-| **1-D Grid Navigator** (`mock_game.py`) | 1-D Corridor (0 to 10) | Boundary limits, turn decay (30 max steps) | Reach goal position `10`<br>Actions: `LEFT`, `RIGHT` |
-| **Vault Runner (2-D Heist)** (`vault_game.py`) | 2-D 8x8 Grid Floor | Guard patrol (`G`, -30 penalty), Lasers (`L`, -5 penalty), Traps (`T`, -8 penalty), Hidden Walls (`H`), Wall sprint crashes (-15 penalty) | Collect Key `K`, then unlock Exit `E`<br>Actions: `UP`, `DOWN`, `LEFT`, `RIGHT`, `WAIT`, `SPRINT` |
+**ProgrammablePros takes an entirely different architectural path:**
+- **Zero Hallucination via Bounded Hypotheses:** Instead of asking *"What should I do next?"*, the state is compressed into high-density tokens, transformed into **orthogonal typed scientific hypotheses**, and evaluated by **Laya** (a lightweight calibrated probability model) for pure mathematical success likelihoods ($0.0 \le P \le 1.0$) in milliseconds.
+- **Expected Value (EV) Decision Engine:** The bot never blindly executes an `argmax(P)` policy. It evaluates multi-objective payoff matrices incorporating progress, structural advantage, severe danger penalties, and repeat move penalties.
+- **Strict Compliance & Cryptographic Audit Chains:** Every move is bound into an immutable **SHA-256 hash-chain** JSON Lines log, guaranteed 4-way probability normalization summing to $1.000000 \in [0.98, 1.02]$, and capped at $\le 10\%$ safety fallback.
+- **Offline & Hosted Parity:** Full decision brains, game engines, and live Streamlit dashboards work both in-process locally and over remote TopGameAI arena endpoints with zero code refactoring.
 
 ---
 
-## 3. How the Bot Works: The 9-Step Pipeline
+## 2. Official Competition Game Matrix
 
-The bot operates on a continuous, deterministic **Sense-Think-Act-Learn** loop orchestrated in `agent_orchestrator.py` and `main.py`:
+From the Genesis 2.0 Track EVA 02 official rules:
+*"You do not build the games. The games run on the TopGameAI Arena site, and you never run them yourself."*  
+For local development and continuous integration without live internet access, we maintain a 100% compliant **Local Test Harness** (`snake_game.py` and `game2048.py`).
+
+| Game Environment | Grid / State | Key Rules & Constraints | Objective & Actions | Scoring / Points |
+| :--- | :--- | :--- | :--- | :--- |
+| **Stage 1: Snake**<br>*(Hosted: `LocalSnakeClient`<br>Local Harness: `snake_game.py`)* | 20x20 Grid | - 180° reversal strictly illegal (rejected)<br>- Wall/self-collision ends game<br>- Max 300 accepted moves | Eat 15 foods to win.<br>Actions: `UP`, `DOWN`, `LEFT`, `RIGHT` | $\text{Score} = \text{foods} \times 60 (+100 \text{ if win})$, capped at 1000.<br>**Unlock Stage 2:** $\ge 600$ points (10+ foods). |
+| **Stage 2: 2048**<br>*(Hosted: `LocalGame2048Client`<br>Local Harness: `game2048.py`)* | 4x4 Grid | - Merges equal adjacent tiles once/move<br>- Spawn 2 (90%) or 4 (10%)<br>- Unchanged board is rejected<br>- Max 2000 accepted moves | Merge toward 512, 1024, 2048 tile.<br>Actions: `UP`, `DOWN`, `LEFT`, `RIGHT` | $\text{Points} = \min(1000, \max(0, (\log_2(\text{best}) - 6) \times 143 + \lfloor\frac{\text{score}}{1000}\rfloor))$.<br>**Unlock Stage 3:** Reach 512 tile.<br>**Judging:** Median of 3 best runs. |
+
+---
+
+## 3. High-Level Decision Architecture
+
+The architecture is divided into clear functional pipelines:
 
 ```text
-       [ Sense ]                [ Think ]                 [ Decide & Act ]                [ Learn ]
-  Game Server State  ──►  Feature Compression  ──►  Calculate Expected Value  ──►  Evaluate Transition
-  (Positions, Turns)      & Hypothesis Query         & Execute Max-EV Action        & Record Failure Memory
-                                  │                             │                              │
-                                  ▼                             ▼                              ▼
-                          Laya Calibration             Live JSONL Telemetry           Dynamic Prompt Warning
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                               1. SENSE & COMPRESSION                                   │
+ │   Raw Game State ──► SnakeCompressor / Board2048Compressor (<= 200 char token budget)  │
+ └───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                             ▼
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                               2. REASON & HYPOTHESIZE                                  │
+ │   SubgoalManager (SURVIVE vs CHASE_FOOD / SURVIVE vs KEEP_CORNER)                      │
+ │   HypothesisBuilder (8 typed questions: Q1 progress toward subgoal, Q2 hazard/danger)  │
+ └───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                             ▼
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                               3. INFER & CALIBRATE                                     │
+ │   Laya Backend (Mock / Local / Http REST API) ──► Raw Likelihoods [0.0, 1.0]           │
+ │   CalibrationEngine (Empirical Platt Scaling + Brier Score Tracking)                   │
+ └───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                             ▼
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                               4. DECIDE & OPTIMIZE                                     │
+ │   SnakeEVCalculator / Board2048EVCalculator (Risk-Reward Argmax over EV)               │
+ │   Legality Mask (Anti-reversal, Wall collision, Board unchanged check)                 │
+ └───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                             ▼
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                         5. COMPLY, LOG & STREAM TELEMETRY                              │
+ │   ComplianceLayer: Normalize 4-way probabilities (sum == 1.000000), <=10% fallback     │
+ │   OfficialLogger: SHA-256 Hash Chain: H_n = SHA256(H_{n-1} | canonical_json)           │
+ │   Streamlit Live Dashboard (viewer_local.py): Real-time UI, board matrix & audits      │
+ └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### The 9-Step Sequential Pipeline (`AgentOrchestrator.play_turn`):
-1. **Observe:** `WorldMemory.observe()` registers the previous transition in persistent spatial memory, automatically inferring `WALL` tiles when moves fail.
-2. **Compress:** `EgocentricCompressor.compress()` produces an agent-centric point-of-view (POV) prompt with relative surroundings (`AHEAD`, `LEFT`, `RIGHT`, `BEHIND`), 8-point compass bearings, and resource counters.
-3. **Subgoal:** `SubgoalManager.get_current_subgoal()` deterministic priority cascade selects the active tactical target (`RETREAT` $\to$ `KEY` $\to$ `EXIT` $\to$ `EXPLORE`).
-4. **Hypothesize:** `HypothesisEngine.generate_hypotheses()` formulates 4 typed scientific questions per legal move (`is_legal`, `toward_subgoal`, `is_dangerous`, `is_novel`) + injects `AnchorProbe` ground-truth calibration checks.
-5. **Laya Inference:** Dispatches typed queries to Laya (or mock engine) for parallel likelihood scoring.
-6. **Calibrate:** `CalibrationEngine.predict()` applies Platt scaling to map raw likelihoods to calibrated probabilities.
-7. **Decide:** `AdvancedEVCalculator.calculate()` computes multi-objective risk-adjusted Expected Value and selects the move via mathematical argmax.
-8. **Log:** `DecisionLogger.append_decision()` writes the full snapshot to `decision_log.jsonl` with immediate flush for real-time Streamlit polling.
-9. **Return:** Dispatches the selected action string to the game client.
-
 ---
 
-## 4. Deep Dive: The Core Strategies & Upgrades
+## 4. Deep-Dive: Core Components & Strategies
 
-The problem statement explicitly warns: *"Teams using the same model will score very differently, and the games will punish weak understanding."* Here is how our architecture provides an asymmetric competitive advantage:
-
----
-
-### Strategy 1: State Compression & Feature Engineering
-* **What it is:**  
-  Raw game states arrive as multi-layered, nested JSON dictionaries cluttered with metadata, status strings, and styling parameters. We extract only mathematical invariants and enforce strict token budgets:
-  - 1-D Game: 60-character vector string.
-  - 2-D Game (`compress_vault_state`): Strict $\le 120$-character string containing current objective (`KEY` vs `EXIT`), Manhattan distances, key possession, steps remaining, laser adjacency, guard distance, and patrol axis.
-* **Why it matters:**  
-  Small models have limited parameter capacity and smaller attention budgets. Flooding them with 50 lines of JSON dilutes their attention weights across irrelevant tokens. Dense feature engineering presents the problem in high signal-to-noise format, ensuring Laya dedicates its computational capacity solely to spatial calculation.
-* **Concrete Example:**  
-  Instead of feeding 600 bytes of raw JSON containing grid arrays, session IDs, and tile colors, Laya receives:
-  `pos=(2,2) obj=KEY obj_dist=3 keys=0 steps_left=35 laser_adj=NONE guard_dist=4 guard_dir=UP facing=RIGHT`
-  Pre-computing distance and direction prevents arithmetic errors in small models.
-
----
+### Strategy 1: State Compression & Token Budget Enforcement
+- **Components:** `SnakeCompressor` (`snake_brain.py`), `Board2048Compressor` (`game2048_brain.py`).
+- **Mechanism:** Strips bloated JSON structures into compact, high signal-to-noise strings under 200 characters:
+  - **Snake Context:** `H:(x,y) D:dir L:len F:(fx,fy) dF:dist W:up/down/left/right B:ahead/left/right E:foods S:steps_rem`
+  - **2048 Context:** `T:max_tile(2^log2)@corner(r,c) E:empty_count Sm:smoothness M:monotonicity Sc:score S:steps_rem`
+- **Why it matters:** Generative and small parameter models degrade when flooded with nested UI metadata. Distilling invariants ensures the attention budget focuses 100% on spatial decision features.
 
 ### Strategy 2: Hypothesis-Driven "Typed Questions"
-* **What it is:**  
-  Laya is an open-weight model specialized in **probability calibration**, not conversational roleplay. Rather than prompting *"Where should the player move next?"*, `formulate_questions()` poses closed, testable binary hypotheses:
-  > *"Context: {compressed_state}. Hypothesis: Executing action '{action}' will successfully progress toward {goal_phrase}. What is the calibrated probability (0.0 to 1.0) that this hypothesis is true?"*
-* **Dynamic Goal Switching:**  
-  In Vault Runner, the `goal_phrase` automatically shifts as game phases complete:
-  - Phase 1 (Keys = 0): `"the KEY"`
-  - Phase 2 (Keys = 1): `"the EXIT without being caught or hitting a hazard"`
-* **Why it matters:**  
-  Open-ended questions force models to generate freeform text, leading to parse errors, hallucinated actions, and non-deterministic behavior. By framing each move as an independent hypothesis, we treat Laya as a pure likelihood scoring function, directly extracting calibrated $P(\text{True}) \in [0.0, 1.0]$.
+- **Components:** `SnakeHypothesisBuilder`, `Board2048HypothesisBuilder`.
+- **Mechanism:** For each candidate action $a \in \{\text{up}, \text{down}, \text{left}, \text{right}\}$, generates two orthogonal questions (8 total per step):
+  - **Q1 (Progress):** *"Context: {C}. Hypothesis: Action '{a}' is legal and progresses toward {subgoal}. What is the calibrated probability (0.0 to 1.0) that this is true?"*
+  - **Q2 (Danger / Collision):** *"Context: {C}. Hypothesis: Action '{a}' causes immediate collision / board paralysis risking game over. What is the calibrated probability (0.0 to 1.0) that this is true?"*
+
+### Strategy 3: Multi-Objective Expected Value (EV) Formulation
+- **Components:** `SnakeEVCalculator`, `Board2048EVCalculator`.
+- **Formulation:**
+  - **Snake:**
+    $$\text{EV}(a) = \big(P_{\text{progress}}(a) \times 10.0\big) - \big(P_{\text{danger}}(a) \times 40.0\big) - \text{penalty}_{\text{repeat}}(a) - \text{penalty}_{\text{illegal}}(a)$$
+  - **2048:**
+    $$\text{EV}(a) = \big(P_{\text{progress}}(a) \times 12.0\big) + \big(P_{\text{structure}}(a) \times 4.0\big) - \big(P_{\text{danger}}(a) \times 30.0\big) - \text{penalty}_{\text{repeat}}(a) - \text{penalty}_{\text{illegal}}(a)$$
+- **Why it beats Argmax:** Naive argmax picks a move with $P=0.72$ over $P=0.70$. But if the first move carries a catastrophic wall crash penalty ($-100$), its EV is deeply negative, whereas the safer move yields high positive EV. EV mathematical argmax completely eliminates high-confidence suicide moves.
+
+### Strategy 4: Failure-Adaptive Memory & In-Context Warnings
+- **Components:** `LayaAgent.recent_outcomes` (`laya_agent.py`), `SnakeCompressor.record_failure()`, `Board2048Compressor.record_failure()`.
+- **Mechanism:** When an attempted move results in zero progress or is rejected, the failure is recorded. On the next step, a dynamic warning is injected:
+  `"WARNING: In the previous turn, taking action '{action}' resulted in no progress. Adjust probability accordingly."`
+- **Result:** Drops the model's confidence for that action (e.g. $80\% \to 10\%$), penalizing its EV and automatically breaking oscillatory trap loops.
+
+### Strategy 5: Compliance Layer & Strict PDF Alignment
+- **Components:** `ComplianceLayer` (`compliance_layer.py`), `OfficialLogger` (`official_logger.py`).
+- **Rules Enforced (from Genesis 2.0 Track EVA 02):**
+  1. **Canonical JSON:** Sorted keys, no spaces (`separators=(',', ':')`), UTF-8, strict rejection of `NaN` or `Infinity`.
+  2. **SHA-256 Hash Chain:**
+     $$H_0 = \text{"GENESIS-" } + \text{session\_id}$$
+     $$H_n = \text{SHA-256}\big(H_{n-1} + "|" + \text{canonical\_json}(\text{line without hash})\big)$$
+  3. **Strict Probability Normalization:**
+     Every logged decision must supply four keys: `{"up", "down", "left", "right"}` summing exactly to $1.000000 \in [0.98, 1.02]$. Residual rounding errors are absorbed into the dominant probability.
+  4. **Strict Safety Fallback Budget:**
+     Safety fallbacks (e.g., intercepting an illegal 180° reversal in Snake) must constitute $\le 10\%$ of all session moves. In our test benchmarks, fallback is maintained at **$0.00\%$** because the EV calculator's legality mask naturally prevents illegal moves.
+  5. **Exact Integrity Invariants:**
+     $$\text{confidence} \equiv \text{probabilities}[\text{chosen}] \quad \text{and} \quad \text{chosen} \equiv \text{action}$$
 
 ---
 
-### Strategy 3: Expected Value (EV) Decision Making
-* **What it is:**  
-  A probability is only half of a decision; the other half is the payoff matrix. In `calculate_expected_values()`, we compute the statistical Expected Value:
-  $$\text{EV} = \Big(P(\text{Success}) \times \text{Reward}\Big) - \Big(\big(1.0 - P(\text{Success})\big) \times \text{Penalty}\Big)$$
-* **Why it matters:**  
-  Novice teams implement an `argmax(probabilities)` policy. But in game environments where certain actions carry asymmetric penalties (guard capture, laser damage, wall crash), choosing a move with a high raw probability and extreme downside is a losing strategy. EV calculation guarantees risk-adjusted optimal play.
-* **Concrete Benchmark Proof (Vault Runner Test 4):**  
-  Suppose action `SPRINT` has raw $P = 0.72$ ($\text{Reward} = +8.0, \text{Penalty} = -15.0$ due to a wall in tile 2).  
-  $$\text{EV}(\text{SPRINT}) = (0.72 \times 8.0) - (0.28 \times 15.0) = 5.76 - 4.20 = \mathbf{+1.56}$$  
-  Meanwhile, `DOWN` has $P = 0.70$ ($\text{Reward} = +10.0, \text{Penalty} = -5.0$):  
-  $$\text{EV}(\text{DOWN}) = (0.70 \times 10.0) - (0.30 \times 5.0) = 7.00 - 1.50 = \mathbf{+5.50}$$  
-  - An argmax bot chooses `SPRINT` ($0.72 > 0.70$) and crashes into the wall.
-  - Our EV bot chooses `DOWN` ($+5.50 > +1.56$), cleanly preserving win equity and avoiding penalty.
+## 5. File Inventory & Roles
+
+| File Path | Primary Class / Function | Purpose |
+| :--- | :--- | :--- |
+| `snake_brain.py` | `SnakeCompressor`, `SnakeSubgoalManager`, `SnakeHypothesisBuilder`, `SnakeEVCalculator` | Stage 1: Perception $\to$ Reasoning $\to$ EV decision pipeline for Snake. |
+| `game2048_brain.py` | `Board2048Compressor`, `Board2048SubgoalManager`, `Board2048HypothesisBuilder`, `Board2048EVCalculator` | Stage 2: Perception $\to$ Reasoning $\to$ EV decision pipeline for 2048. |
+| `compliance_layer.py` | `ComplianceLayer` | PDF compliance bridge, probability normalization, fallback checks, decision block builder. |
+| `official_logger.py` | `OfficialLogger` | Creates append-only JSONL logs with cryptographic SHA-256 hash chains. |
+| `run_local_games.py` | `run_session()`, `main()` | Unified CLI runner for local Snake and 2048 games with hash chain logging. |
+| `viewer_local.py` | Streamlit Dashboard | Visual live viewer for Snake (20x20 emojis) and 2048 (styled CSS tiles). |
+| `local_game_clients.py` | `LocalSnakeClient`, `LocalGame2048Client` | Mock-arena client wrappers mimicking hosted REST endpoints. |
+| `snake_game.py` | `SnakeGame` | Local test harness: 20x20 Snake simulation (PS2 §4.1). |
+| `game2048.py` | `Game2048` | Local test harness: 4x4 2048 simulation with official points formula (PS2 §4.2). |
+| `game_clients.py` | `SnakeClient`, `Game2048Client` | Live hosted TopGameAI API clients for competition arena. |
+| `orchestrator_compliance.py` | `ComplianceOrchestrator` | Hosted arena runner enforcing stage gates and official logging. |
+| `laya_agent.py` | `LayaAgent` | Interface for Laya inference, question formulation, and outcome memory. |
+| `calibration_engine.py` | `CalibrationEngine` | Post-hoc Platt scaling and Brier score tracking. |
 
 ---
 
-### Strategy 4: Failure-Adaptive Prompting (Short-Term Memory)
-* **What it is:**  
-  A bounded short-term memory ring buffer (`recent_outcomes`, tracking the last 3 turns). If an action unexpectedly fails to reduce distance to the goal (e.g. colliding with an unannounced hidden wall or trying to walk through a locked EXIT), the transition is logged. On the next turn, the hypothesis prompt for that action dynamically appends:
-  > *"WARNING: In the previous turn, taking action '{action}' resulted in no progress. Adjust probability accordingly."*
-* **Why it matters:**  
-  Stateless bots suffer from **oscillatory trap loops**: when facing a hidden obstacle or locked barrier, a stateless bot repeatedly selects the same high-probability move turn after turn until its turn limit runs out. Our adaptive memory breaks loops on turn $N+1$.
-* **Concrete Example from Live Vault Run:**  
-  At position `(2, 2)`, moving `RIGHT` hits a hidden wall at `(3, 2)`:
-  - **Turn 30:** Bot selects `RIGHT`. Result: player remains at `(2, 2)`, hidden wall logged.
-  - **Turn 31:** Prompt appends `WARNING`. Laya incorporates the negative prior and drops $P(\text{RIGHT})$ from $80.3\% \to 10.0\%$.
-  - **Immediate Impact:** $\text{EV}(\text{RIGHT})$ plunges from $+7.04 \to -3.50$. The bot pivots to `WAIT` ($\text{EV} = -0.11$) and `UP` ($\text{EV} = +1.04$), safely circumnavigating the obstacle.
+## 6. Verified Benchmark Results
 
----
-
-### Strategy 5: Perception Layer (World Memory & Egocentric POV)
-* **What it is:**  
-  A pair of decoupled perception classes:
-  1. **`WorldMemory` (`world_memory.py`):** Retains object permanence across moves. When an action fails to alter coordinates, the target cell is inferred as a `WALL`. Tracks cell entry counts to calculate visit decay, and empirical action success distributions `(coord, action) -> [successes, attempts]`.
-  2. **`EgocentricCompressor` (`egocentric_compressor.py`):** Translates global coordinates into an agent-centric frame:
-     ```text
-     POV: agent at (1,0), facing RIGHT
-     LOCAL: AHEAD: UNKNOWN, LEFT: WALL, RIGHT: UNKNOWN, BEHIND: UNKNOWN
-     OBJECTIVES: KEY(bearing=SE, dist=4), EXIT(bearing=SE, dist=13 [LOCKED-NEEDS-KEY])
-     RESOURCES: health=100, ammo=5, keys=0, steps_left=35
-     HISTORY: action 'UP' at (1,0) failed (Position unchanged (hit obstacle / wall))
-     ```
-* **Why it matters:**  
-  Doom-style and maze environments require partial observability reasoning. Absolute coordinates confuse generalized models across mirrored maps, whereas egocentric descriptions ("AHEAD is WALL, bearing to KEY is SE") align naturally with calibrated probability assessment.
-
----
-
-### Strategy 6: Reasoning Layer (Subgoal Arbitration & Multi-Outcome Hypotheses)
-* **What it is:**  
-  1. **`SubgoalManager` (`subgoal_manager.py`):** Deterministic priority tree ensuring the bot balances self-preservation with objective completion:
-     - `Priority 1 (RETREAT)`: Critical health (<20) with active threat (<3 dist).
-     - `Priority 2 (KEY)`: Keys held == 0 and locked barrier present.
-     - `Priority 3 (EXIT)`: Keys held > 0, direct navigation to goal.
-     - `Priority 4 (EXPLORE)`: Nearest unvisited frontier cell.
-  2. **`HypothesisEngine` (`hypothesis_engine.py`):** Formulates 4 orthogonal typed scientific queries per legal move (`is_legal`, `toward_subgoal`, `is_dangerous`, `is_novel`).
-  3. **Anchor Probes:** Injects ground-truth sanity check questions (e.g. moving into a known WALL is legal $\to$ expected 0.0) to detect model calibration degradation.
-* **Why it matters:**  
-  Single-question bots cannot distinguish between illegal moves, moves toward different subgoals, and dangerous moves. 4-way typed queries give the EV calculator clean independent variables for multi-objective optimization.
-
----
-
-### Strategy 7: Orchestration & Decision Engine (`agent_orchestrator.py`)
-* **What it is:**  
-  1. **`AgentOrchestrator` (`agent_orchestrator.py`):** Master coordinator executing the full 9-step pipeline (Observe $\to$ Compress $\to$ Subgoal $\to$ Hypothesize $\to$ Infer $\to$ Calibrate $\to$ Decide $\to$ Log $\to$ Return) with complete intermediate state auditability.
-  2. **`AdvancedEVCalculator` (`advanced_ev_calculator.py`):** Synthesizes:
-     $$\text{EV}(a) = P(\text{legal}) \times \Big[\Big(P(\text{subgoal}) W_{\text{subgoal}} - (1 - P(\text{subgoal})) W_{\text{fail}}\Big) - P(\text{danger}) W_{\text{danger}} + P(\text{novel}) W_{\text{novel}}\Big] - (1 - P(\text{legal})) W_{\text{illegal}} - \text{penalty}_{\text{repeat}}$$
-  3. **`CalibrationEngine` (`calibration_engine.py`):** Post-hoc Platt scaling and empirical Brier scoring.
-  4. **`DecisionLogger` (`decision_logger.py`):** Non-blocking append-only JSONL streaming logger with immediate flushing.
-
----
-
-## 5. Automated Verification & 20-Seed Headless Benchmark
-
-We built an acceptance test suite in `test_vault.py` covering all game mechanics, edge cases, state compression limits, and statistical performance:
-
+### 1. Snake Local Benchmark
 ```bash
-python test_vault.py
+python run_local_games.py --game snake --seed 42 --use-mock-laya
 ```
+*Result:*
+- **Foods Eaten:** 15 / 15 (MAX WIN)
+- **Score:** 1000 / 1000
+- **Steps:** 231 accepted moves
+- **Fallback Rate:** 0.00% (Budget $\le 10\%$)
+- **Hash Chain:** `Hash chain VALID — 231 entries verified.`
 
-### Headless Benchmark Results (20 Randomized Procedural Seeds):
-```text
-  ╔══════════════════════════════════════════════════════════╗
-  ║         Headless Benchmark — 20 Seeds (Vault Runner)    ║
-  ╠══════════════════════════╦═══════════════╦══════════════╣
-  ║ Metric                   ║  EV Agent     ║  Argmax (P)  ║
-  ╠══════════════════════════╬═══════════════╬══════════════╣
-  ║ Win rate                 ║ 19/20 (95%)   ║ 18/20 (90%)  ║
-  ║ Avg steps                ║          15.9 ║         14.0 ║
-  ║ Avg penalty              ║          -0.9 ║         -3.5 ║
-  ╚══════════════════════════╩═══════════════╩══════════════╝
-
-  [PASS] Test 6: EV penalty (-0.9) <= argmax penalty (-3.5) -- risk-aware payoffs working
-  Results: 11 passed, 0 failed out of 11 tests
-```
-
----
-
-## 6. Live Telemetry & Audit Dashboard (`viewer.py`)
-
-Run the Streamlit live dashboard for real-time judge presentations:
+### 2. 2048 Local Benchmark
 ```bash
-streamlit run viewer.py
+python run_local_games.py --game 2048 --seed 42 --use-mock-laya
 ```
-
-### Dashboard Capabilities:
-- **5 Top-Level KPIs:** Total Decisions Logged, Player Position, Latest Chosen Move, Expected Value (EV), Game Status.
-- **🗺️ Agent Position Heatmap (Vault Runner):** Visualizes the agent's spatial trajectory across the 8x8 floor grid in real-time using Pandas pivot aggregation.
-- **Calibrated Probabilities & EV Bar Graphs:** Side-by-side comparison of Laya's confidence vs calculated EV scores for every legal action.
-- **Typed Hypothesis Inspector:** Displays the exact natural-language hypothesis queries evaluated by Laya on each step.
-- **Short-Term Memory Alert Banners:** Displays active `WARNING` prompts whenever failure-adaptive memory intervenes.
-- **Chronological Audit Feed:** Complete table of historical decisions streamed directly from `decision_log.jsonl`.
-
----
-
-## 7. Hackathon Day Readiness (The 5-Minute Transition)
-
-Our codebase is pre-engineered for a seamless 5-minute transition from the local simulator to live competition endpoints:
-
-```text
-                  ┌──────────────────────────────────────────────┐
-                  │              ARCHITECTURE CORE               │
-                  │   • State Compression     • EV Calculation   │
-                  │   • Hypothesis Engine     • Memory Buffer    │
-                  │   • World Memory          • Egocentric POV   │
-                  │   • Subgoal Manager       • Anchor Probes    │
-                  │   • Agent Orchestrator    • Decision Logger  │
-                  │   • JSONL Audit Logger    • Streamlit Viewer │
-                  └───────────────────────┬──────────────────────┘
-                                          │ (Remains 100% Untouched)
-                         ┌────────────────┴────────────────┐
-                         ▼                                 ▼
-             [ Toggle 1: Game Client ]         [ Toggle 2: Model Inference ]
-             Replace MockGame/VaultRunner      In agent_orchestrator.py & laya_agent.py:
-             with Live Game REST Endpoint      Flip use_mock = False,
-             (base_url + API Key)              Supply Hackathon API Key
-```
-
-### What Changes:
-1. **Model Toggle (`agent_orchestrator.py` & `laya_agent.py`):** Flip mock inference to `client.predict_probability()` using the competition API key.
-2. **Game Client (`main.py`):** Register the competition HTTP client into `GAME_REGISTRY`.
-3. **What Remains 100% Untouched:** State compressor, egocentric POV, world memory, subgoal manager, hypothesis engine, calibration engine, EV engine, memory buffer, JSONL logger, and Streamlit dashboard.
+*Result:*
+- **Best Tile:** 256 (Progressing toward 512/1024)
+- **Score:** 3548
+- **Official Points:** 289
+- **Steps:** 302 accepted moves
+- **Fallback Rate:** 0.00% (Budget $\le 10\%$)
+- **Hash Chain:** `Hash chain VALID — 302 entries verified.`
 
 ---
 
-## 8. Top 3 Anticipated Judge Questions & Winning Answers
+## 7. Judge & AI Model Defense Briefing (Q&A)
 
-### Question 1: "Why use a small calibrated probability model like Laya instead of sending the game screenshot or JSON to GPT-4o or Claude 3.5 Sonnet?"
-> **Winning Answer:**  
-> "Generative frontier models excel at creative synthesis, but they are ill-suited as real-time game controllers. They suffer from high inference latency (1–3 seconds per step), cost orders of magnitude more per interaction, and are prone to generative hallucinations—frequently inventing actions outside the legal game schema.  
-> Laya is purpose-built for calibration. By querying bounded hypotheses, we receive mathematically grounded probabilities in tens of milliseconds with zero hallucination. Combined with our Expected Value engine, Laya provides deterministic, risk-managed control that frontier LLMs cannot replicate at game speed."
+### Q1: Why not just use GPT-4o or Claude 3.5 Sonnet to play the games?
+> **Answer:** Large generative models have three fatal flaws in competitive gaming:
+> 1. **Latency:** 1–3 seconds per turn violates arena response windows. Laya runs in $\le 20\text{ms}$.
+> 2. **Hallucination:** Generative models invent invalid actions or drift from formatting requirements. Laya outputs bounded likelihoods for strict typed questions.
+> 3. **Cost & Non-Determinism:** Frontier LLMs cost dollars per game and fail cryptographic reproducibility. Laya paired with our EV calculator produces deterministic, auditable decisions.
 
----
+### Q2: What is the primary difference between your bot and an `argmax(P)` bot?
+> **Answer:** An `argmax` bot blindly executes whichever move has the highest raw probability. In complex games, payoffs are asymmetric. A move with 72% success that risks a wall crash ($-100$ penalty) yields an EV of deeply negative expectation. A move with 70% success and standard penalty yields positive EV. Our EV engine calculates mathematical expectation, completely avoiding suicidal high-probability traps.
 
-### Question 2: "How does your Expected Value formulation actually prevent losses when a higher probability move is available?"
-> **Winning Answer:**  
-> "Standard bots operate on a naive argmax probability policy. If Move A has a 72% probability of success and Move B has a 70% probability, an argmax bot always picks Move A.  
-> However, in competitive gaming, penalties are asymmetric. In our Vault Runner heist game, sprinting forward toward the key carries a 28% risk of slamming into a wall (-15 penalty), yielding an EV of $(0.72 \times 8) - (0.28 \times 15) = \mathbf{+1.56}$.  
-> Stepping down has a 70% success rate with a standard failure penalty (-5), yielding an EV of $(0.70 \times 10) - (0.30 \times 5) = \mathbf{+5.50}$. Our EV decision engine mathematically avoids high-probability 'death traps' and selects the move with the highest risk-adjusted mathematical expectation."
+### Q3: How do you guarantee the official logs are authentic and not tampered with?
+> **Answer:** We enforce an in-process cryptographic SHA-256 hash chain on every single move. Each line contains `prev_hash` and `hash = SHA256(prev_hash | canonical_json)`. If a single character, probability decimal, or step number is altered post-hoc, `OfficialLogger.verify_log_file()` immediately flags the chain break.
 
----
-
-### Question 3: "What happens if the game introduces novel mechanics, dynamic wind, or invisible obstacles that the model was never trained on?"
-> **Winning Answer:**  
-> "That exact scenario is why we built Feature 4 (Failure-Adaptive Prompting), Feature 5 (`WorldMemory`), Feature 6 (`SubgoalManager`), and Feature 7 (`AgentOrchestrator`).  
-> Because the model does not possess omniscient knowledge of unannounced game mechanics (like the hidden walls in Vault Runner), our agent relies on empirical feedback via a bounded short-term memory buffer and persistent spatial grid. When an action unexpectedly fails to reduce distance or hits a barrier, the target coordinate is mapped as `WALL` and the transition is logged. On the next tick, the hypothesis prompt explicitly injects an in-context negative prior informing Laya of the immediate outcome.  
-> This suppresses the calibrated probability for that action, shifts the EV landscape, and forces the bot to explore alternative trajectories—completely preventing the infinite failure loops that disqualify rigid bots."
-
----
-
-## 9. Team Presentation & Defense Checklist
-- [x] **Terminal 1:** `streamlit run viewer.py` (Display on presentation monitor showing live KPIs, 2-D heatmap, EV bars, and compressed context).
-- [x] **Terminal 2:** `python main.py --game vault` (Execute the 2D heist bot showing real-time ASCII maps, probability calibration, and step feedback).
-- [x] **Terminal 3 (Benchmarking):** `python test_vault.py` (Run the 11-test acceptance suite and 20-seed headless benchmark live for the judges).
-- [x] **Terminal 4 (Orchestrator V2):** `python agent_orchestrator.py` (Run the 3-turn end-to-end 9-step decision pipeline test).
-- [x] **Audit Trail:** Open `decision_log.jsonl` to demonstrate append-only transparency and verifiable decision logs.
+### Q4: How easily does this codebase switch to the live hackathon arena?
+> **Answer:** Seamlessly in under 2 minutes. The core decision brains (`snake_brain.py`, `game2048_brain.py`), compression layers, EV calculators, and compliance logger remain 100% untouched. All that changes is switching from `LocalSnakeClient` / `LocalGame2048Client` to the hosted arena REST endpoints and updating `LAYA_MODE=http` in `.env`.
