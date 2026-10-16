@@ -208,12 +208,15 @@ Features:
 
 7. HACKATHON DAY READINESS (THE 5-MINUTE TRANSITION)
 --------------------------------------------------------------------------------
-1. In agent_orchestrator.py and laya_agent.py: Flip use_mock = False, supply the API key.
-   The integration stub client.predict_probability(context=..., question=...)
-   is already written and tested.
-2. In main.py: Register the live HTTP REST game client into GAME_REGISTRY.
-3. The rest of the codebase (Compressor, Egocentric POV, WorldMemory, SubgoalManager,
-   HypothesisEngine, CalibrationEngine, AdvancedEVCalculator, DecisionLogger,
+1. In laya_agent.py: Flip use_mock = False and supply the real Laya API key.
+   The integration stub client.predict_probability(context=..., question=...) is
+   already written and tested.
+2. In orchestrator_compliance.py: Set api_key to the live TopGameAI bearer token.
+   Change game_type to "snake" (Stage 1) or "2048" (Stage 2).
+3. In game_clients.py: Update the 3 endpoint path constants (_PATH_START, _PATH_MOVE,
+   _PATH_STATE) in SnakeClient and Game2048Client once the official API docs are released.
+4. The rest of the codebase (EgocentricCompressor, WorldMemory, SubgoalManager,
+   HypothesisEngine, CalibrationEngine, AdvancedEVCalculator, CalibrationEngine,
    Streamlit Viewer) remains 100% UNTOUCHED.
 
 
@@ -250,5 +253,228 @@ A3: "Our agent uses Feature 4 (Failure-Adaptive Prompting), Feature 5 (WorldMemo
 [x] Terminal 2: python main.py --game vault (Runs 2D heist bot with real-time ASCII map)
 [x] Terminal 3: python test_vault.py (Runs 11-test acceptance suite and 20-seed benchmark)
 [x] Terminal 4: python agent_orchestrator.py (Runs 3-turn end-to-end 9-step decision pipeline test)
-[x] Telemetry: Open decision_log.jsonl to prove append-only auditability and transparent logs
+[x] Terminal 5: python orchestrator_compliance.py (Simulates 3-turn Snake + verifies SHA-256 hash chain)
+[x] Telemetry: Open decision_log_{session_id}.jsonl to prove PDF-compliant append-only auditability
 ================================================================================
+
+
+================================================================================
+10. GENESIS 2.0 OFFICIAL COMPLIANCE LAYER (EVA 02 - FINAL SUBMISSION)
+================================================================================
+Added in final compliance phase on branch NotImp. Four new production files
+enforce every non-negotiable rule from the Genesis 2.0 Track2_PS2_support.pdf.
+
+--------------------------------------------------------------------------------
+FILE 1: official_logger.py  (replaces decision_logger.py for competition use)
+--------------------------------------------------------------------------------
+Purpose: Append-only JSONL logger with cryptographic SHA-256 hash chain.
+
+Key functions:
+  _canonical_json(data)
+    - Recursively sorts all dict keys (ensures deterministic ordering)
+    - Uses separators=(',', ':') - no whitespace
+    - Raises ValueError on NaN or Infinity (PDF forbids these)
+    - UTF-8 safe via json.dumps with ensure_ascii=False
+
+  _compute_hash(line_data, prev_hash)
+    - Input:  prev_hash + "|" + canonical_json(line_without_hash_field)
+    - Output: SHA-256 hex digest (lowercase, 64 chars)
+    - Hash covers all 11 required fields EXCLUDING the hash field itself
+
+  OfficialLogger.start_session(session_id, game_name)
+    - Opens decision_log_{session_id}.jsonl in append mode
+    - Seeds the chain: prev_hash = "GENESIS-{session_id}" (PDF §5)
+    - Returns the absolute log file path
+
+  OfficialLogger.log_move(...)
+    - Accepts all 11 PDF-mandated fields
+    - Computes hash, appends line, flushes immediately (durable on crash)
+    - Advances the chain: prev_hash = new_hash
+    - Returns the full constructed line dict
+
+  OfficialLogger.save_final_state(session_id, final_state_dict)
+    - Writes final_state_{session_id}.json (PDF §7)
+
+  OfficialLogger.verify_log_file(log_path)  [static]
+    - Re-derives every hash independently from prev_hash + canonical payload
+    - Checks chain continuity: prev_hash[n] == hash[n-1] for all n > 0
+    - Returns (is_valid: bool, message: str)
+
+--------------------------------------------------------------------------------
+FILE 2: compliance_layer.py
+--------------------------------------------------------------------------------
+Purpose: Stateless bridge between our EV engine and the strict PDF log schema.
+
+Key methods:
+  normalize_probabilities_for_log(ev_scores_or_raw_probs)
+    Input formats accepted:
+      - Raw float dict: {"up": 0.8, "down": 0.1, ...}
+      - AdvancedEVCalculator nested dict: {"up": {"ev": 8.5, ...}, ...}
+    Algorithm:
+      1. Extract scalar per direction (uses "ev" key if nested)
+      2. Softmax with max-subtraction for numerical stability
+      3. Force-normalize: compute residual = sum - 1.0, subtract from
+         the dominant direction to achieve sum == exactly 1.000
+      4. Clamp all values to [0.0, 1.0] and verify 0.98 <= sum <= 1.02
+    Output: exactly {"up": float, "down": float, "left": float, "right": float}
+
+  check_snake_safety_fallback(current_state, proposed_action)
+    - Reads current_direction from state key "direction", "current_direction",
+      or "snake_direction"
+    - Detects exact reversal (e.g., moving DOWN while traveling UP)
+    - Returns safest alternative from ordered fallback preference table
+    - Returns None if move is safe
+
+  build_decision_block(questions, normalized_probs, chosen_action, source)
+    Constructs the exact PDF "decision" object:
+      {
+        "questions":     [list of hypothesis strings sent to Laya],
+        "probabilities": {"up": f, "down": f, "left": f, "right": f},
+        "chosen":        action string (== parent log line's "action" field),
+        "confidence":    probabilities[chosen] (EXACT equality, not rounded),
+        "source":        "laya" or "fallback"
+      }
+    Raises ValueError if chosen not in normalized_probs or source is invalid.
+
+  compute_fallback_rate(log_lines)
+    - Computes fallback % across all logged moves
+    - Used to verify the PDF §4 budget of <= 10% fallback moves
+
+--------------------------------------------------------------------------------
+FILE 3: game_clients.py
+--------------------------------------------------------------------------------
+Purpose: HTTP REST clients for Stage 1 (Snake) and Stage 2 (2048) arenas.
+
+BaseGameClient
+  - Wraps requests.Session with Retry (3x, backoff=0.3, on 429/5xx)
+  - Sets Authorization: Bearer {api_key} and Accept/Content-Type headers
+  - Generic _get(path, params) and _post(path, payload) methods
+  - Implements context manager (__enter__ / __exit__) for safe cleanup
+
+SnakeClient (extends BaseGameClient)
+  Endpoints (update constants when official docs release):
+    _PATH_START = "/snake/start"   (POST)
+    _PATH_MOVE  = "/snake/move"    (POST)
+    _PATH_STATE = "/snake/state"   (GET)
+
+  start_game(agent_name) -> (session_id, initial_state)
+    - Normalises: accepts "state" or "initial_state" key in response
+
+  send_move(session_id, action) -> MoveResult
+    - Detects rejection: server flag ("rejected", "invalid", "illegal")
+    - Returns MoveResult(state_after, result, game_over, api_ms)
+    - api_ms measured with time.perf_counter() precisely around POST
+
+  get_final_state(session_id) -> dict
+
+Game2048Client (extends BaseGameClient)
+  Endpoints:
+    _PATH_START = "/2048/start"
+    _PATH_MOVE  = "/2048/move"
+    _PATH_STATE = "/2048/state"
+
+  send_move(session_id, action, state_before=None) -> MoveResult
+    - Silent rejection detection: if state_before supplied and board matrix
+      is identical after move, result = "rejected" (no server flag needed)
+    - Also checks server flags: "no_change", "unchanged"
+
+MoveResult dataclass
+  state_after: dict   - Exact raw API response state
+  result:      str    - "applied" or "rejected"
+  game_over:   bool   - Checks game_over, done, finished in response/state
+  api_ms:      float  - Round-trip POST latency in milliseconds
+
+--------------------------------------------------------------------------------
+FILE 4: orchestrator_compliance.py
+--------------------------------------------------------------------------------
+Purpose: Master game loop wiring every compliance component together.
+
+play_compliant_game(game_type, api_key, agent_name, use_mock_laya, log_dir)
+
+Full per-step sequence (PDF §6 ordering):
+  1.  Initialize SnakeClient or Game2048Client; call start_game().
+  2.  Initialize OfficialLogger, ComplianceLayer, LayaAgent, SubgoalManager,
+      AdvancedEVCalculator, WorldMemory, HypothesisEngine.
+  3.  prev_turn_end = perf_counter()  [timing anchor for first turn]
+  4.  LOOP while step < max_steps:
+        a. decide_start = perf_counter()
+        b. Arbitrate subgoal (SubgoalManager.select_subgoal)
+        c. Normalise player_pos to scalar if list (2-D API compatibility)
+        d. laya.compress_state(scalar_state) -> compressed string
+        e. HypothesisEngine.generate_hypotheses() + flatten_queries()
+           -> question_strings (logged in decision.questions)
+        f. laya.decide(state, possible_actions, compressed_state_override=compressed)
+           -> raw_probs per direction
+           NOTE: compressed_state_override prevents internal re-compress
+                 (avoids TypeError on list-typed player_pos from REST API)
+        g. AdvancedEVCalculator.calculate() -> chosen_action, ev_breakdown
+        h. decide_ms = (perf_counter() - decide_start) * 1000
+        i. ComplianceLayer.check_snake_safety_fallback()
+           -> if reversal detected: chosen_action = fallback, source = "fallback"
+        j. ComplianceLayer.normalize_probabilities_for_log(ev_breakdown)
+           -> normalized_probs summing exactly to 1.000
+        k. ComplianceLayer.build_decision_block() -> decision_block
+        l. client.send_move(session_id, chosen_action) -> MoveResult
+           api_ms from MoveResult (measured inside game client)
+        m. turn_ms = (perf_counter() - prev_turn_end) * 1000
+        n. OfficialLogger.log_move(all 11 fields) -> appended to JSONL
+        o. laya.record_outcome() (updates short-term failure memory)
+        p. state_before = state_after
+        q. if game_over: save_final_state(); close; return summary
+  5.  try/finally guarantees logger.close_session() + client.close()
+      even if an exception propagates (prevents Windows file-handle leaks).
+
+__main__ block (self-verifying simulation):
+  - Mocks 5 HTTP responses (1 start + 3 moves + 1 final GET)
+  - Runs play_compliant_game("snake", use_mock_laya=True)
+  - Calls OfficialLogger.verify_log_file() on the produced JSONL
+  - Asserts for every log line:
+      result in ("applied", "rejected")
+      0.98 <= sum(probabilities.values()) <= 1.02
+      decision.chosen == action
+      decision.confidence == probabilities[action]
+      decision.source in ("laya", "fallback")
+      timing keys: decide_ms, api_ms, turn_ms all present
+  - Prints hash, confidence, prob_sum for each step
+
+--------------------------------------------------------------------------------
+COMPLIANCE ARCHITECTURE DIAGRAM
+--------------------------------------------------------------------------------
+  [Game API / Mock]
+       |
+  [game_clients.py]          <- HTTP REST with retry/backoff
+  SnakeClient / Game2048Client
+       |
+  [orchestrator_compliance.py]  <- Master timing and step loop
+       |         |
+       |    [compliance_layer.py]
+       |    normalize_probabilities_for_log()  <- Softmax + force-sum
+       |    check_snake_safety_fallback()      <- Anti-reversal guard
+       |    build_decision_block()             <- PDF decision object
+       |         |
+       |    [Internal EV Pipeline]
+       |    LayaAgent.decide()                 <- Mock or live Laya
+       |    HypothesisEngine                  <- 4-way typed questions
+       |    SubgoalManager                    <- RETREAT/KEY/EXIT/EXPLORE
+       |    AdvancedEVCalculator              <- Multi-objective EV argmax
+       |    EgocentricCompressor              <- Dense state encoding
+       |    WorldMemory                       <- Spatial map + failures
+       |
+  [official_logger.py]       <- SHA-256 chain JSONL (PDF §2-§7)
+  decision_log_{sid}.jsonl
+  final_state_{sid}.json
+
+--------------------------------------------------------------------------------
+KEY INVARIANTS ENFORCED (ALL MACHINE-VERIFIED)
+--------------------------------------------------------------------------------
+  Hash chain:   SHA-256(prev_hash + "|" + canonical_json(line)) verified
+  Prob sum:     0.98 <= sum(up+down+left+right) <= 1.02 enforced by softmax
+                + force-sum residual correction
+  Confidence:   probabilities[chosen] == confidence (exact float equality)
+  Chosen:       decision.chosen == log_line.action (enforced in build_decision_block)
+  Source:       Only "laya" or "fallback" permitted; ValueError otherwise
+  Fallback %:   Tracked via compute_fallback_rate(); target <= 10%
+  No NaN/Inf:   _canonical_json raises ValueError before any hash is written
+  Chain seed:   First prev_hash = "GENESIS-{session_id}" (not a hex hash)
+================================================================================
+
