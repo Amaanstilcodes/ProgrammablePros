@@ -1,106 +1,325 @@
-"""Streamlit Live Decision Viewer Module.
+"""Streamlit Live Decision & Compliance Viewer — Genesis 2.0 Track EVA 02.
 
-Reads decision_log.jsonl in real-time and visualizes:
-- Current game state & progress toward goal
-- Calibrated probability distributions returned by Laya
-- Formulated questions sent to Laya
-- Chronological decision audit history
+Real-time telemetry and compliance audit dashboard for TopGameAI Arena (Snake & 2048):
+- Auto-refreshing live visualization connected to decision_log.jsonl
+- Real-time cryptographic SHA-256 hash chain verification
+- Dynamic game rendering: ASCII grid for Snake & styled tile matrix for 2048
+- Compliance telemetry: Laya vs Fallback source badges, timing metrics, and probability distribution
+- Chronological feed of the last 20 steps
 """
 
-import time
-from typing import Any, Dict, List
+from __future__ import annotations
 
+import json
+import math
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
 import streamlit as st
 
-try:
-    import pandas as pd
-    _PANDAS_AVAILABLE = True
-except ImportError:
-    _PANDAS_AVAILABLE = False
+from official_logger import OfficialLogger
 
-from logger import DecisionLogger
+# ─────────────────────────────────────────────────────────────────────────────
+# UI Configuration & Styling
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-def setup_ui() -> None:
-    """Configure Streamlit page layout and custom styling."""
+def setup_page() -> None:
+    """Configure Streamlit layout, dark theme accents, and custom CSS."""
     st.set_page_config(
-        page_title="Laya Bot Live Viewer",
-        page_icon="🤖",
+        page_title="Genesis 2.0 Live Viewer | Track EVA 02",
+        page_icon="⚡",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    # Custom styling for clean hackathon dashboard appearance
     st.markdown(
         """
         <style>
+        /* Base typography & palette */
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap');
+        
+        html, body, [class*="css"] {
+            font-family: 'Inter', sans-serif;
+        }
+        code, pre {
+            font-family: 'JetBrains Mono', monospace !important;
+        }
+
+        /* Top header container */
+        .main-header {
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            border: 1px solid #312e81;
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .main-title {
+            font-size: 26px;
+            font-weight: 700;
+            color: #f8fafc;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .main-sub {
+            font-size: 14px;
+            color: #94a3b8;
+            margin-top: 6px;
+            margin-bottom: 0;
+        }
+
+        /* Metrics cards */
         .metric-card {
-            background-color: #1e222d;
-            border-radius: 8px;
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 10px;
             padding: 16px;
-            margin-bottom: 12px;
-            border-left: 4px solid #4CAF50;
+            margin-bottom: 14px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
         }
-        .action-badge {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-weight: bold;
+        .metric-label {
+            font-size: 12px;
             text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #9ca3af;
+            margin-bottom: 4px;
+            font-weight: 600;
         }
-        .action-right {
-            background-color: #1b5e20;
-            color: #a5d6a7;
+        .metric-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #f3f4f6;
+            font-family: 'JetBrains Mono', monospace;
         }
-        .action-left {
-            background-color: #b71c1c;
-            color: #ffcdd2;
+
+        /* Source badges */
+        .badge-laya {
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid #10b981;
+            color: #34d399;
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 14px;
+            display: inline-block;
+            letter-spacing: 0.05em;
         }
+        .badge-fallback {
+            background: rgba(245, 158, 11, 0.15);
+            border: 1px solid #f59e0b;
+            color: #fbbf24;
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 14px;
+            display: inline-block;
+            letter-spacing: 0.05em;
+        }
+
+        /* Hash chain banner */
+        .hash-valid {
+            background: rgba(6, 78, 59, 0.4);
+            border: 1px solid #059669;
+            color: #6ee7b7;
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-weight: 600;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .hash-broken {
+            background: rgba(127, 29, 29, 0.4);
+            border: 1px solid #dc2626;
+            color: #fca5a5;
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        /* 2048 Tile styling */
+        .tile-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            background: #1e293b;
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            max-width: 360px;
+            margin: auto;
+        }
+        .tile-cell {
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 700;
+            border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            background: #0f172a;
+            color: #64748b;
+        }
+        .tile-2 { background: #334155; color: #f8fafc; }
+        .tile-4 { background: #475569; color: #f8fafc; }
+        .tile-8 { background: #d97706; color: #fff; }
+        .tile-16 { background: #ea580c; color: #fff; }
+        .tile-32 { background: #dc2626; color: #fff; }
+        .tile-64 { background: #b91c1c; color: #fff; }
+        .tile-128 { background: #eab308; color: #000; box-shadow: 0 0 10px #eab308; }
+        .tile-256 { background: #facc15; color: #000; box-shadow: 0 0 12px #facc15; }
+        .tile-512 { background: #38bdf8; color: #000; box-shadow: 0 0 14px #38bdf8; }
+        .tile-1024 { background: #818cf8; color: #fff; box-shadow: 0 0 16px #818cf8; }
+        .tile-2048 { background: #a855f7; color: #fff; box-shadow: 0 0 20px #a855f7; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def main() -> None:
-    """Streamlit application entry point."""
-    setup_ui()
+# ─────────────────────────────────────────────────────────────────────────────
+# Safe Cached Data Reader
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Sidebar configuration
-    st.sidebar.title("⚙️ Dashboard Controls")
-    log_file_path = st.sidebar.text_input("Log File Path", value="decision_log.jsonl")
+@st.cache_data(ttl=1)
+def load_log_records(log_file_path: str) -> list[dict[str, Any]]:
+    """Safely read JSONL decision records with TTL cache to prevent lock conflicts.
+
+    Args:
+        log_file_path: File system path to the .jsonl log.
+
+    Returns:
+        List of parsed JSON record dictionaries.
+    """
+    path = Path(log_file_path)
+    if not path.exists():
+        return []
+
+    records: list[dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line_str = line.strip()
+                if line_str:
+                    records.append(json.loads(line_str))
+    except Exception:
+        # File might be partially written by compliant_runner mid-turn
+        pass
+
+    return records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Board Visualizers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_snake_ascii(state: dict[str, Any], width: int = 16, height: int = 16) -> str:
+    """Generate a clean ASCII grid representation of the Snake board."""
+    grid = [["· " for _ in range(width)] for _ in range(height)]
+
+    # Food position
+    food_data = state.get("food", [5, 5])
+    if isinstance(food_data, (list, tuple)) and len(food_data) >= 2:
+        if isinstance(food_data[0], (list, tuple)):
+            fx, fy = int(food_data[0][0]), int(food_data[0][1])
+        else:
+            fx, fy = int(food_data[0]), int(food_data[1])
+        if 0 <= fx < width and 0 <= fy < height:
+            grid[fy][fx] = "★ "
+
+    # Snake body
+    snake_body = state.get("snake", [])
+    if isinstance(snake_body, (list, tuple)):
+        for idx, pt in enumerate(snake_body):
+            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                x, y = int(pt[0]), int(pt[1])
+                if 0 <= x < width and 0 <= y < height:
+                    grid[y][x] = "◆ " if idx == 0 else "■ "
+
+    border_top = "┌" + "──" * width + "┐"
+    border_bot = "└" + "──" * width + "┘"
+    rows = [f"│{''.join(row)}│" for row in grid]
+    return "\n".join([border_top] + rows + [border_bot])
+
+
+def render_2048_html(board: list[list[int]]) -> str:
+    """Render an HTML grid of the 2048 tiles."""
+    html_cells = []
+    for row in board:
+        for val in row:
+            tile_class = f"tile-{val}" if val in (2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048) else ""
+            display_text = str(val) if val > 0 else ""
+            html_cells.append(f'<div class="tile-cell {tile_class}">{display_text}</div>')
+
+    return f'<div class="tile-grid">{"".join(html_cells)}</div>'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main Dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """Main Streamlit dashboard lifecycle."""
+    setup_page()
+
+    # Sidebar Controls
+    st.sidebar.title("⚙️ Telemetry Controls")
+    log_file = st.sidebar.text_input("Log File", value="decision_log.jsonl")
     auto_refresh = st.sidebar.checkbox("Live Auto-Refresh", value=True)
-    refresh_rate = st.sidebar.slider("Refresh Rate (seconds)", min_value=0.5, max_value=5.0, value=1.0, step=0.5)
-    max_history = st.sidebar.slider("Show Recent Decisions", min_value=5, max_value=25, value=10)
+    refresh_rate = st.sidebar.slider(
+        "Refresh Interval (seconds)",
+        min_value=1.0,
+        max_value=5.0,
+        value=2.0,
+        step=0.5,
+    )
 
     st.sidebar.divider()
     st.sidebar.markdown(
         """
-        ### 🧠 Architecture
-        - **Model:** Laya (Calibrated Probability)
-        - **Pipeline:**
-          1. State observation
-          2. Typed query formulation
-          3. Probability scoring
-          4. Argmax action execution
+        ### 🛡️ Genesis 2.0 Invariants
+        - **Track:** EVA 02 (TopGameAI Arena)
+        - **Stages:** Stage 1 (Snake) & Stage 2 (2048)
+        - **Log Format:** Strict SHA-256 JSONL
+        - **Probabilities:** 4 keys, Sum ∈ [0.98, 1.02]
+        - **Fallback Cap:** ≤ 10%
         """
     )
 
-    if st.sidebar.button("🔄 Manual Refresh"):
+    if st.sidebar.button("🔄 Force Refresh"):
+        st.cache_data.clear()
         st.rerun()
 
-    # Main dashboard header
-    st.title("Laya Game Bot -- Live Decision Viewer")
-    st.caption("Real-time telemetry and decision probability calibration stream")
+    # Header
+    st.markdown(
+        """
+        <div class="main-header">
+            <div class="main-title">
+                <span>🤖 TopGameAI Autonomous Live Dashboard</span>
+            </div>
+            <div class="main-sub">
+                Genesis 2.0 Track EVA 02 — Real-time telemetry, calibration, and cryptographic audit
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # Read records using DecisionLogger
-    logger = DecisionLogger(log_path=log_file_path)
-    records: List[Dict[str, Any]] = logger.read_recent_logs(limit=None)
+    # Read records
+    records = load_log_records(log_file)
 
     if not records:
         st.info(
-            "⏳ **Waiting for decision logs...**\n\n"
-            "Run `python main.py` in your terminal to start the game loop and populate decisions."
+            f"⏳ **Waiting for logs in `{log_file}`...**\n\n"
+            "Run `python compliant_runner.py` in your terminal to begin generating verified moves."
         )
         if auto_refresh:
             time.sleep(refresh_rate)
@@ -108,164 +327,193 @@ def main() -> None:
         return
 
     latest = records[-1]
-    latest_state = latest.get("game_state", {})
-    latest_probs = latest.get("probabilities_returned", {})
-    latest_evs = latest.get("expected_values", {})
-    latest_ev = latest.get("expected_value")
-    latest_action = latest.get("chosen_action", "N/A")
-    latest_compressed = latest.get("compressed_state", "N/A")
-    latest_warning = latest.get("adaptive_warning")
-    game_type = latest_state.get("game", latest_state.get("game_type", "classic"))
-    player_pos = latest_state.get("player_pos", 0)
-    goal_pos = latest_state.get("goal_pos", 10)
-    game_status = latest_state.get("status", "IN_PROGRESS")
+    game_type = str(latest.get("game", "snake")).lower()
+    step_num = latest.get("step", len(records))
+    action = str(latest.get("action", "NONE")).upper()
+    result = str(latest.get("result", "applied")).upper()
+    decision = latest.get("decision", {})
+    source = str(decision.get("source", "laya")).lower()
+    confidence = float(decision.get("confidence", 0.0))
+    probs = decision.get("probabilities", {})
+    timing = latest.get("timing", {})
+    state_after = latest.get("state_after", {})
+    questions = decision.get("questions", [])
 
-    # Top Level KPI Metrics (5 columns)
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("Total Decisions Logged", len(records))
-    with col2:
-        # Support both 1-D int position (classic) and 2-D tuple (vault)
-        if isinstance(player_pos, (list, tuple)):
-            pos_str = f"({player_pos[0]},{player_pos[1]})"
-        else:
-            pos_str = f"{player_pos} / {goal_pos}"
-        st.metric("Player Position", pos_str)
-    with col3:
-        st.metric("Latest Chosen Move", latest_action.upper())
-    with col4:
-        ev_display = f"{latest_ev:+.2f}" if latest_ev is not None else "N/A"
-        st.metric("Expected Value (EV)", ev_display)
-    with col5:
-        status_color = "🟢" if game_status == "WON" else ("🟡" if game_status == "IN_PROGRESS" else "🔴")
-        st.metric("Game Status", f"{status_color} {game_status}")
+    # Top Telemetry Row
+    col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+    with col_t1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Game & Step</div>
+                <div class="metric-value">{game_type.upper()} · #{step_num}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_t2:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Action & Outcome</div>
+                <div class="metric-value">{action} <span style="font-size:16px;color:#10b981;">({result})</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_t3:
+        badge_html = (
+            '<span class="badge-laya">🟢 LAYA INFERENCE</span>'
+            if source == "laya"
+            else '<span class="badge-fallback">🟠 SAFETY FALLBACK</span>'
+        )
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Decision Source</div>
+                <div style="margin-top:6px;">{badge_html}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_t4:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Chosen Confidence</div>
+                <div class="metric-value">{confidence:.4f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # Feature 4 Alert: Adaptive Warning Callout
-    if latest_warning:
-        st.warning(f"⚠️ **Failure-Adaptive Warning Triggered:** {latest_warning}")
-
-    # Feature 1 Context: Compressed State Display
-    st.info(f"🧬 **Feature 1 — Compressed State Context:** `{latest_compressed}`")
-
-    # Game-type badge
-    if game_type in ("vault", "VAULT_RUNNER"):
-        st.caption("🏦 Game: **Vault Runner** (2-D Heist)")
+    # Hash Chain Status & Audit Bar
+    is_valid, verify_msg = OfficialLogger.verify_log_file(log_file)
+    if is_valid:
+        st.markdown(
+            f"""
+            <div class="hash-valid">
+                <span>🛡️</span> <b>Hash Chain Verified:</b> {verify_msg}
+                <span style="margin-left:auto; font-family:'JetBrains Mono'; font-size:11px; opacity:0.8;">
+                    Latest Hash: {latest.get('hash', '')[:20]}…
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     else:
-        st.caption("🎮 Game: **Classic 1-D Grid Navigator**")
+        st.markdown(
+            f"""
+            <div class="hash-broken">
+                <span>⚠️</span> <b>Hash Chain Invalidation Warning:</b> {verify_msg}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    # Goal Progress Bar (works for both game types)
-    if isinstance(player_pos, (list, tuple)) and isinstance(goal_pos, (list, tuple)):
-        # Vault: show steps-based progress
-        steps_used = latest_state.get("steps_used", 0)
-        max_steps = latest_state.get("max_steps", 40)
-        progress_val = min(1.0, max(0.0, steps_used / max_steps if max_steps > 0 else 0.0))
-        st.progress(progress_val, text=f"Steps Used: {steps_used}/{max_steps} ({progress_val:.0%})")
-        # Keys held indicator
-        keys_held = latest_state.get("keys_held", 0)
-        st.caption(f"Keys held: {'🔑 YES' if keys_held else 'None'}")
-    else:
-        progress_val = min(1.0, max(0.0, player_pos / goal_pos if goal_pos > 0 else 0.0))
-        st.progress(progress_val, text=f"Progress to Goal: {player_pos}/{goal_pos} ({progress_val:.0%})")
+    st.write("")
 
-    st.divider()
+    # Main Visualization Columns
+    col_left, col_right = st.columns([1.1, 1.2])
 
-    # ── Vault Runner Heatmap (only when running vault game) ───────
-    if game_type in ("vault", "VAULT_RUNNER") and _PANDAS_AVAILABLE:
-        st.subheader("🗺️ Agent Position Heatmap (Vault Runner)")
-        heat_data: Dict[str, Any] = {}
-        for rec in records:
-            pos = rec.get("game_state", {}).get("player_pos")
-            if isinstance(pos, (list, tuple)) and len(pos) == 2:
-                key = f"{pos[0]},{pos[1]}"
-                heat_data[key] = heat_data.get(key, 0) + 1
-        if heat_data:
-            import json as _json
-            rows = []
-            for k, cnt in heat_data.items():
-                x, y = map(int, k.split(","))
-                rows.append({"x": x, "y": y, "visits": cnt})
-            df = pd.DataFrame(rows)
-            pivot = df.pivot_table(index="y", columns="x", values="visits", fill_value=0)
-            st.dataframe(pivot, use_container_width=True)
-            st.caption("Each cell = number of times the agent visited that grid coordinate.")
-        st.divider()
+    with col_left:
+        st.subheader("🎮 Live Arena State")
 
-    # Active Decision Inspection
-    st.subheader("🎯 Latest Evaluated Move (Probabilities vs Expected Values)")
-    col_probs, col_context = st.columns([1, 1])
+        if game_type == "snake":
+            snake_body = state_after.get("snake", [])
+            snake_len = len(snake_body) if isinstance(snake_body, list) else 1
+            snake_score = state_after.get("score", 0)
+            snake_dir = str(state_after.get("direction", "N/A")).upper()
 
-    with col_probs:
-        st.markdown("**Calibrated Probabilities & EV Scores:**")
-        for action, prob in latest_probs.items():
-            ev_score = latest_evs.get(action)
-            ev_str = f" | EV: **{ev_score:+.2f}**" if ev_score is not None else ""
-            st.write(f"**Action `{action}`**: {prob:.1%}{ev_str}")
-            st.progress(min(1.0, max(0.0, float(prob))))
+            sub_c1, sub_c2, sub_c3 = st.columns(3)
+            sub_c1.metric("Score", snake_score)
+            sub_c2.metric("Length", snake_len)
+            sub_c3.metric("Direction", snake_dir)
 
-    with col_context:
-        st.markdown("**Typed Hypothesis Questions Evaluated by Laya:**")
-        questions = latest.get("questions_asked", {})
-        if isinstance(questions, dict):
-            for act, q in questions.items():
-                st.markdown(f"- **`{act}`**: *\"{q}\"*")
-        else:
-            st.write(questions)
+            ascii_grid = render_snake_ascii(state_after)
+            st.caption("ASCII Arena Board (◆ Head, ■ Body, ★ Food):")
+            st.code(ascii_grid, language="text")
 
-        with st.expander("🔍 View Raw State JSON"):
-            st.json(latest_state)
+        elif game_type == "2048":
+            board_matrix = state_after.get("board") or [[0] * 4 for _ in range(4)]
+            score_2048 = state_after.get("score", 0)
+            max_tile = state_after.get("max_tile", max(max(r) for r in board_matrix))
 
-    st.divider()
+            sub_c1, sub_c2 = st.columns(2)
+            sub_c1.metric("Current Score", score_2048)
+            sub_c2.metric("Max Tile", max_tile)
 
-    # Historical Decisions Feed
-    st.subheader(f"📜 Recent Decision History (Latest {min(len(records), max_history)})")
-    recent_records = list(reversed(records[-max_history:]))
+            st.caption("Dynamic Board Grid:")
+            st.markdown(render_2048_html(board_matrix), unsafe_allow_html=True)
 
-    for idx, item in enumerate(recent_records):
-        step_num = len(records) - idx
-        action = item.get("chosen_action", "N/A")
-        ts = item.get("timestamp", "")
-        probs = item.get("probabilities_returned", {})
-        evs = item.get("expected_values", {})
-        chosen_ev_item = item.get("expected_value")
-        warning_item = item.get("adaptive_warning")
-        compressed_item = item.get("compressed_state", "N/A")
-        state = item.get("game_state", {})
+    with col_right:
+        st.subheader("📊 Calibrated Probabilities & Latency")
 
-        prob_summary = " | ".join(f"{a}: {p:.1%}" for a, p in probs.items())
-        ev_summary = " | ".join(f"{a}: {e:+.2f}" for a, e in evs.items()) if evs else ""
-        badge_class = "action-right" if action.lower() == "right" else "action-left"
-        warning_badge = " ⚠️ [ADAPTED]" if warning_item else ""
+        # Probability distribution bar chart
+        if probs:
+            prob_df = pd.DataFrame(
+                [{"Action": k.upper(), "Probability": v} for k, v in probs.items()]
+            ).set_index("Action")
+            st.bar_chart(prob_df, height=220)
 
-        with st.expander(f"Step {step_num:02d} — Action: [{action.upper()}]{warning_badge} — EV: {chosen_ev_item:+.2f} — {ts}"):
-            st.markdown(
-                f"<span class='action-badge {badge_class}'>Action: {action}</span> "
-                f"&nbsp;&nbsp; **EV:** `{chosen_ev_item:+.2f}` "
-                f"&nbsp;&nbsp; **Probabilities:** `{prob_summary}`",
+            # Sum verification indicator
+            prob_sum = sum(probs.values())
+            sum_color = "green" if 0.98 <= prob_sum <= 1.02 else "red"
+            st.caption(
+                f"**Probability Sum:** <span style='color:{sum_color}; font-weight:bold;'>"
+                f"{prob_sum:.6f}</span> (Mandated: 0.98 to 1.02)",
                 unsafe_allow_html=True,
             )
-            if ev_summary:
-                st.caption(f"Action Expected Values: {ev_summary}")
-            st.markdown(f"**Compressed State:** `{compressed_item}`")
-            st.markdown(f"**Position at Decision:** `{state.get('player_pos', 'N/A')}` / `{state.get('goal_pos', 'N/A')}`")
 
-            if warning_item:
-                st.markdown(f"**Memory Warning Active:** `{warning_item}`")
+        # 3-Column Timing Metrics
+        st.markdown("##### ⏱️ Latency Telemetry (per PDF §6)")
+        time_c1, time_c2, time_c3 = st.columns(3)
+        with time_c1:
+            st.metric("Decide Time", f"{timing.get('decide_ms', 0):.0f} ms")
+        with time_c2:
+            st.metric("API RTT", f"{timing.get('api_ms', 0):.0f} ms")
+        with time_c3:
+            st.metric("Total Turn", f"{timing.get('turn_ms', 0):.0f} ms")
 
-            # Hidden wall discovery indicator (Vault only)
-            hw = item.get("game_state", {}).get("hidden_wall_discovered")
-            if hw:
-                st.markdown(f"**Hidden Wall Discovered at:** `{hw}` (triggers next-turn WARNING)")
+        # Active Hypothesis Questions
+        if questions:
+            with st.expander(f"🔎 Formulated Hypothesis Questions ({len(questions)} queries)", expanded=False):
+                for q_idx, q_text in enumerate(questions, start=1):
+                    st.markdown(f"**Q{q_idx}:** `{q_text}`")
 
-            col_q, col_raw = st.columns(2)
-            with col_q:
-                st.caption("Typed Questions Evaluated:")
-                st.write(item.get("questions_asked", {}))
-            with col_raw:
-                st.caption("Raw State Record:")
-                st.json(state)
+    st.divider()
+
+    # Chronological Decision Feed (Last 20 Steps)
+    st.subheader("📜 Chronological Decision Audit Feed")
+    feed_rows = []
+    recent_records = records[-20:]
+
+    for r in recent_records:
+        r_step = r.get("step")
+        r_action = str(r.get("action", "")).upper()
+        r_result = str(r.get("result", "")).upper()
+        r_dec = r.get("decision", {})
+        r_conf = f"{r_dec.get('confidence', 0.0):.4f}"
+        r_src = r_dec.get("source", "laya").upper()
+        r_timing = f"{r.get('timing', {}).get('turn_ms', 0):.0f} ms"
+        r_hash = r.get("hash", "")[:12] + "…"
+
+        feed_rows.append({
+            "Step": r_step,
+            "Action": r_action,
+            "Result": r_result,
+            "Confidence": r_conf,
+            "Source": r_src,
+            "Turn Time": r_timing,
+            "Hash Prefix": r_hash,
+        })
+
+    if feed_rows:
+        feed_df = pd.DataFrame(feed_rows)
+        st.dataframe(feed_df, use_container_width=True, hide_index=True)
 
     # Auto-refresh loop
-    if auto_refresh and game_status != "WON":
+    if auto_refresh:
         time.sleep(refresh_rate)
         st.rerun()
 

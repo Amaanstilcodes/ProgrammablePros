@@ -1,420 +1,267 @@
-"""Orchestrator Compliance Module — Genesis 2.0 EVA 02.
+"""Unified Compliance Orchestrator — Genesis 2.0 Track EVA 02.
 
-Master game loop integrating:
-  - SnakeClient / Game2048Client (HTTP REST)
-  - OfficialLogger (SHA-256 hash chain JSONL)
-  - ComplianceLayer (probability normalisation + safety)
-  - LayaAgent (hypothesis-driven EV pipeline)
-
-Timing uses ``time.perf_counter()`` exclusively per PDF §6:
-  - decide_ms : state received → Laya probability returned
-  - api_ms    : move POST sent → game response received (from MoveResult)
-  - turn_ms   : end of prev move response → end of this move response
+Master competition runner coordinating:
+- Modular GameBundles for Snake (Stage 1) and 2048 (Stage 2)
+- MonotonicTurnTimer (time.perf_counter() precision)
+- StepLedger (Configurable rejected step policy)
+- Dual logging: Official hash-chain JSONL + Rich internal trace
+- Rule R1-R10 enforcement (Stage gate, Laya-only decisions, <= 10% fallback)
 """
 
 from __future__ import annotations
 
+import argparse
+import copy
+import logging
+import os
+import sys
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
-from advanced_ev_calculator import AdvancedEVCalculator
-from compliance_layer import ComplianceLayer
-from game_clients import Game2048Client, MoveResult, SnakeClient
-from hypothesis_engine import HypothesisEngine
-from laya_agent import LayaAgent
-from official_logger import OfficialLogger
-from subgoal_manager import Subgoal, SubgoalManager
-from world_memory import WorldMemory
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
-# -----------------------------------------------------------------------------
-# Constants
-# -----------------------------------------------------------------------------
+from core.advanced_ev_calculator import AdvancedEVCalculator
+from core.compliance_layer import ComplianceLayer
+from core.config import AppConfig
+from core.laya_backend import HttpLayaBackend, LayaBackend, LocalLayaBackend, MockLayaBackend
+from core.official_logger import OfficialLogger
+from core.rich_trace import RichTraceLogger
+from core.stage_gate import StageGate, StageLockedError
+from core.step_ledger import StepLedger
+from core.timing import MonotonicTurnTimer
+from games.registry import get_game_bundle
 
-LEGAL_ACTIONS: list[str] = ["up", "down", "left", "right"]
-MAX_STEPS_SNAKE: int = 500    # Hard cap to prevent runaway sessions
-MAX_STEPS_2048: int = 2000
-LOG_DIR: str = "logs"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("orchestrator")
 
 
-# -----------------------------------------------------------------------------
-# play_compliant_game
-# -----------------------------------------------------------------------------
-
-def play_compliant_game(
-    game_type: str,
+def run_orchestrated_game(
+    game: str = "snake",
     api_key: str = "",
     agent_name: str = "ProgrammablePros",
-    use_mock_laya: bool = True,
-    log_dir: str = LOG_DIR,
+    is_mock: bool = True,
     max_steps_override: int | None = None,
+    allow_stage_override: bool = False,
+    rejected_step_policy: str = "repeat_last_applied",
+    custom_log_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run a fully compliant game session with hash-chained logging.
+    """Execute a fully compliant game session.
 
-    Sequence per step (PDF §6):
-    1. Record ``turn_start``.
-    2. Get ``state_before``.
-    3. Record ``decide_start`` → run EV pipeline → record ``decide_ms``.
-    4. Check Snake safety fallback.
-    5. Normalise probabilities → build decision block.
-    6. Record ``api_start`` → POST move → record ``api_ms`` from MoveResult.
-    7. Calculate ``turn_ms`` = (perf_counter() - prev_turn_end) * 1000.
-    8. Call ``logger.log_move(…)`` with all required fields.
-    9. If game ended → ``logger.save_final_state(…)``.
-
-    Args:
-        game_type:           "snake" or "2048" (case-insensitive).
-        api_key:             Bearer token for the TopGameAI API.
-        agent_name:          Agent display name.
-        use_mock_laya:       If True, runs Laya in offline mock mode.
-        log_dir:             Directory for JSONL log output.
-        max_steps_override:  Override the default step cap.
-
-    Returns:
-        Summary dict with keys: session_id, total_steps, fallback_rate,
-        log_path, final_state_path, game_over.
-
-    Raises:
-        ValueError: If game_type is not "snake" or "2048".
+    Returns summary dictionary with session_id, accepted_steps, log_path, and outcome.
     """
-    game_type_lower = game_type.strip().lower()
-    if game_type_lower not in ("snake", "2048"):
-        raise ValueError(f"Unsupported game_type: '{game_type}'. Must be 'snake' or '2048'.")
+    game_clean = game.strip().lower()
 
-    max_steps = max_steps_override or (
-        MAX_STEPS_SNAKE if game_type_lower == "snake" else MAX_STEPS_2048
+    # 1. Enforce Rule R8 (Stage Gate for 2048)
+    stage_gate = StageGate()
+    stage_gate.assert_stage_unlocked(game_clean, allow_override=(is_mock or allow_stage_override))
+
+    # 2. Acquire Game Component Suite
+    bundle = get_game_bundle(
+        game=game_clean,
+        api_key=api_key,
+        agent_name=agent_name,
+        is_mock=is_mock,
     )
+    max_steps = max_steps_override or bundle.max_steps
 
-    # -- 1. Initialise game client ---------------------------------------------
-    if game_type_lower == "snake":
-        client: SnakeClient | Game2048Client = SnakeClient(
-            api_key=api_key, agent_name=agent_name
-        )
-    else:
-        client = Game2048Client(api_key=api_key, agent_name=agent_name)
-
-    session_id, state_before = client.start_game(agent_name)
-    game_name: str = game_type_lower  # "snake" or "2048" per PDF
-
-    # -- 2. Initialise subsystems ----------------------------------------------
-    logger = OfficialLogger(log_dir=log_dir)
-    log_path: Path = logger.start_session(session_id, game_name)
-
+    # 3. Initialize Engine Components
+    step_ledger = StepLedger(
+        policy=rejected_step_policy,  # type: ignore[arg-type]
+        max_accepted_steps=max_steps,
+    )
     compliance = ComplianceLayer()
-    laya = LayaAgent(use_mock=use_mock_laya)
-    subgoal_mgr = SubgoalManager()
     ev_calc = AdvancedEVCalculator()
-    memory = WorldMemory()
-    hypo_engine = HypothesisEngine()
+    laya_backend: LayaBackend = MockLayaBackend()
 
-    logged_lines: list[dict[str, Any]] = []
-    step: int = 0
+    # 4. Start Game Session
+    session_id, raw_state_before = bundle.client.start_game(agent_name)
+    initial_response_time = time.perf_counter()
+    timer = MonotonicTurnTimer(initial_turn_start=initial_response_time)
 
-    # Timing anchor: no previous move response on turn 1
-    prev_turn_end: float = time.perf_counter()
+    # 5. Initialize Dual Loggers
+    official_log = OfficialLogger(is_mock=is_mock)
+    log_path = official_log.start_session(
+        session_id=session_id,
+        game=game_clean,
+        agent_name=agent_name,
+        custom_log_path=custom_log_path,
+    )
+    session_dir = official_log.session_dir or Path(f"logs/{game_clean}/{session_id}")
+    rich_trace = RichTraceLogger(session_dir=session_dir, session_id=session_id)
+    rich_trace.open()
 
-    # -- 3. Main game loop -----------------------------------------------------
-    # try/finally guarantees logger + client are always closed, preventing
-    # Windows file-handle leaks when exceptions propagate out of the loop.
+    print("================================================================================")
+    print(f"[*] TOPGAMEAI ORCHESTRATOR — Genesis 2.0 Track EVA 02")
+    print(f"    Game: {game_clean.upper()} | Mock: {is_mock} | Agent: {agent_name}")
+    print(f"    Session ID: {session_id}")
+    print(f"    Official Log: {log_path}")
+    print("================================================================================")
+
+    state_before = raw_state_before
+    game_over = False
+    turn_counter = 0
+
     try:
-        while step < max_steps:
-            step += 1
-            turn_start: float = time.perf_counter()  # noqa: F841
+        while not game_over and not step_ledger.is_cap_reached:
+            turn_counter += 1
+            timer.start_decision()
 
-            # -- 3a. Subgoal arbitration ---------------------------------------
-            decide_start: float = time.perf_counter()
-            try:
-                subgoal: Subgoal = subgoal_mgr.select_subgoal(state_before, memory)
-            except Exception:
-                subgoal = Subgoal(
-                    target_type="EXPLORE",
-                    coordinates=None,
-                    description="Fallback exploration subgoal.",
-                )
+            # Parse & extract features
+            parsed_state = bundle.parser.parse(state_before)
+            features = bundle.features.extract_features(parsed_state, bundle.memory)
+            subgoal = bundle.subgoals.arbitrate(parsed_state, bundle.memory)
+            hypos = bundle.hypotheses.build_hypotheses(features, subgoal, bundle.legal_actions)
 
-            # -- 3b. State compression (scalar normalisation) ------------------
-            # laya.compress_state() uses arithmetic on player_pos and expects a
-            # scalar int. API states may return player_pos as a [x, y] list;
-            # we collapse it to a single int before passing it to laya.
-            _raw_pos = state_before.get("player_pos", 0)
-            if isinstance(_raw_pos, (list, tuple)) and len(_raw_pos) >= 2:
-                _scalar_state: dict[str, Any] = dict(state_before)
-                _scalar_state["player_pos"] = int(_raw_pos[0]) + int(_raw_pos[1])
-            else:
-                _scalar_state = state_before
+            # Query Laya backend
+            # Primary hypothesis probabilities (for official log probabilities block)
+            primary_probabilities: dict[str, float] = {}
+            for act in bundle.legal_actions:
+                q = hypos["queries_by_action"][act]["toward_subgoal"]
+                primary_probabilities[act] = laya_backend.predict_probability(hypos["context"], q)
 
-            compressed: str = laya.compress_state(_scalar_state)
+            # Full 4-way typed probabilities for EV calculation
+            typed_probabilities: dict[str, dict[str, float]] = {}
+            for act in bundle.legal_actions:
+                typed_probabilities[act] = {
+                    dim: laya_backend.predict_probability(hypos["context"], q_text)
+                    for dim, q_text in hypos["queries_by_action"][act].items()
+                }
 
-            # -- 3c. Hypothesis generation -------------------------------------
-            hypotheses = hypo_engine.generate_hypotheses(
-                compressed_context=compressed,
-                legal_actions=LEGAL_ACTIONS,
-                subgoal=subgoal,
-                memory=memory,
-            )
-            flat_queries = hypo_engine.flatten_queries(hypotheses)
-            question_strings: list[str] = [q for (_, _, q) in flat_queries]
-
-            # -- 3d. Laya probability inference --------------------------------
-            # compressed_state_override bypasses laya's internal compress_state()
-            # so it never tries to do arithmetic on the raw API state.
-            raw_probs: dict[str, float] = laya.decide(
-                state=_scalar_state,
-                possible_actions=LEGAL_ACTIONS,
-                compressed_state_override=compressed,
-            )
-
-            # -- 3e. EV calculation --------------------------------------------
-            player_pos: Any = state_before.get("player_pos", (0, 0))
-            chosen_action, ev_breakdown = ev_calc.calculate(
+            # Multi-objective Expected Value synthesis
+            player_pos = features.get("player_pos", (0, 0))
+            best_action, ev_breakdown = ev_calc.calculate(
                 current_pos=player_pos,
-                legal_actions=LEGAL_ACTIONS,
-                probs={
-                    d: {
-                        "is_legal": raw_probs.get(d, 0.5),
-                        "toward_subgoal": raw_probs.get(d, 0.5),
-                        "is_dangerous": max(0.0, 0.5 - raw_probs.get(d, 0.5)),
-                        "is_novel": 0.1,
-                    }
-                    for d in LEGAL_ACTIONS
-                },
-                recent_failures=laya.recent_outcomes,
+                legal_actions=bundle.legal_actions,
+                probs=typed_probabilities,
+            )
+            ev_scores = {a: ev_breakdown[a]["ev"] for a in bundle.legal_actions}
+
+            # Action selection & safety fallback check
+            chosen_action, source = bundle.policy.select_action(
+                action_probabilities=primary_probabilities,
+                ev_scores=ev_scores,
+                legal_actions=bundle.legal_actions,
+                state_before=state_before,
             )
 
-            decide_ms: float = (time.perf_counter() - decide_start) * 1000.0
+            timer.end_decision()
 
-            # -- 3f. Snake safety fallback -------------------------------------
-            source: str = "laya"
-            if game_type_lower == "snake":
-                safe_alternative = compliance.check_snake_safety_fallback(
-                    current_state=state_before,
-                    proposed_action=chosen_action,
-                )
-                if safe_alternative is not None:
-                    chosen_action = safe_alternative
-                    source = "fallback"
+            # Normalize primary action probabilities (strictly [0.98, 1.02] summing to 1.000000)
+            normalized_probs = compliance.normalize_probabilities(primary_probabilities)
 
-            # -- 3g. Normalise probabilities -----------------------------------
-            ev_scores_for_norm = {d: ev_breakdown.get(d, {}) for d in LEGAL_ACTIONS}
-            normalized_probs: dict[str, float] = compliance.normalize_probabilities_for_log(
-                ev_scores_for_norm
-            )
-
-            # -- 3h. Build decision block --------------------------------------
-            decision_block: dict[str, Any] = compliance.build_decision_block(
-                questions=question_strings,
+            # Build Canonical Decision Block (Invariant I1-I6)
+            decision_block = compliance.build_decision_block(
+                questions=hypos["primary_questions"],
                 normalized_probs=normalized_probs,
                 chosen_action=chosen_action,
                 source=source,
             )
 
-            # -- 3i. Send move (api_ms timed inside MoveResult) ----------------
-            move_result: MoveResult = client.send_move(
+            # Dispatch Move
+            timer.start_api()
+            move_result = bundle.client.send_move(
                 session_id=session_id,
                 action=chosen_action,
-                **({"state_before": state_before} if game_type_lower == "2048" else {}),
+                state_before=state_before,
             )
-            state_after = move_result.state_after
-            result = move_result.result
+            timer.end_api(move_result.api_ms)
+            timing = timer.complete_turn()
 
-            # -- 3j. Compute turn_ms -------------------------------------------
-            turn_end: float = time.perf_counter()
-            turn_ms: float = (turn_end - prev_turn_end) * 1000.0
-            prev_turn_end = turn_end
+            # Record in StepLedger
+            step_to_log = step_ledger.record_move(move_result.result)
 
-            # -- 3k. Log the move ----------------------------------------------
-            timing: dict[str, float] = {
-                "decide_ms": round(decide_ms, 3),
-                "api_ms": round(move_result.api_ms, 3),
-                "turn_ms": round(turn_ms, 3),
-            }
-            log_line = logger.log_move(
-                session_id=session_id,
-                game=game_name,
-                step=step,
+            # Append Official Log Line
+            log_line = official_log.log_move(
+                step=step_to_log,
                 state_before=state_before,
                 action=chosen_action,
-                state_after=state_after,
-                result=result,
+                state_after=move_result.state_after,
+                result=move_result.result,
                 decision=decision_block,
-                timing=timing,
+                timing=timing.to_dict(),
             )
-            logged_lines.append(log_line)
 
-            # -- 3l. Update Laya short-term memory -----------------------------
-            laya.record_outcome(
+            # Append Rich Trace Line
+            rich_trace.log_trace(
+                step=step_to_log,
                 action=chosen_action,
-                prev_state=_scalar_state,
-                new_state=state_after,
-                success=(result == "applied"),
-                details=f"step={step} result={result}",
+                result=move_result.result,
+                raw_laya_output=primary_probabilities,
+                typed_probabilities=typed_probabilities,
+                anchor_probes=[],
+                ev_breakdown=ev_breakdown,
+                subgoal=subgoal,
+                features=features,
             )
 
-            # -- 3m. Advance state ---------------------------------------------
-            state_before = state_after
+            # Memory observation
+            parsed_after = bundle.parser.parse(move_result.state_after)
+            bundle.memory.observe(parsed_state, chosen_action, parsed_after)
 
-            # -- 3n. Game-over handling ----------------------------------------
-            if move_result.game_over:
-                final_state = client.get_final_state(session_id)
-                final_state_path = logger.save_final_state(session_id, final_state)
-                logger.close_session(session_id)
-                client.close()
-                fallback_rate = compliance.compute_fallback_rate(logged_lines)
-                return {
-                    "session_id": session_id,
-                    "total_steps": step,
-                    "fallback_rate": round(fallback_rate, 4),
-                    "log_path": str(log_path),
-                    "final_state_path": str(final_state_path),
-                    "game_over": True,
-                }
+            # Console Telemetry
+            badge = "[LAYA]" if source == "laya" else "[FALLBACK]"
+            print(
+                f"[TURN {turn_counter:03d} | STEP {step_to_log:03d}] "
+                f"Act: {chosen_action.upper():<5} {badge:<10} | "
+                f"Res: {move_result.result.upper():<8} | Conf: {decision_block['confidence']:.4f} | "
+                f"Turn: {timing.turn_ms:3d}ms [D:{timing.decide_ms:2d}ms A:{timing.api_ms:2d}ms] | "
+                f"Score: {parsed_after.get('score', 0)}"
+            )
 
-        # -- 4. Step-cap reached -----------------------------------------------
-        final_state_cap = client.get_final_state(session_id)
-        final_path_cap = logger.save_final_state(session_id, final_state_cap)
-        logger.close_session(session_id)
-        client.close()
-        fallback_rate = compliance.compute_fallback_rate(logged_lines)
-        return {
-            "session_id": session_id,
-            "total_steps": step,
-            "fallback_rate": round(fallback_rate, 4),
-            "log_path": str(log_path),
-            "final_state_path": str(final_path_cap),
-            "game_over": False,
-            "note": "Terminated at step cap.",
-        }
+            state_before = move_result.state_after
+            game_over = move_result.game_over
 
     finally:
-        # Idempotent — safe to call twice if game ended cleanly above.
-        # Ensures file handles are released on Windows even after exceptions.
-        logger.close_session(session_id)
-        client.close()
+        # Atomic final state & manifest persistence
+        final_state_path = official_log.save_final_state(state_before)
+        manifest_path = official_log.write_manifest(
+            agent_name=agent_name,
+            outcome="completed" if game_over else ("cap_reached" if step_ledger.is_cap_reached else "aborted"),
+        )
+        official_log.close()
+        rich_trace.close()
+        bundle.client.close()
 
+    # Post-run hash verification
+    is_valid, msg = OfficialLogger.verify_log_file(log_path)
+    print(f"\n[SUMMARY] Session finished. Accepted Steps: {step_ledger.accepted_count}, Total Moves: {step_ledger.total_attempts}")
+    print(f"          Log Verification: {msg}")
+    print(f"          Final State: {final_state_path.name}")
+    print(f"          Manifest: {manifest_path.name}")
 
-# -----------------------------------------------------------------------------
-# __main__: Simulate 3 Snake turns with mock state, verify hash chain
-# -----------------------------------------------------------------------------
+    return {
+        "session_id": session_id,
+        "accepted_steps": step_ledger.accepted_count,
+        "total_moves": step_ledger.total_attempts,
+        "game_over": game_over,
+        "log_path": str(log_path),
+        "final_state_path": str(final_state_path),
+        "is_valid": is_valid,
+    }
+
 
 if __name__ == "__main__":
-    import json
-    import os
-    import tempfile
-    from pathlib import Path
-    from unittest.mock import MagicMock, patch
+    parser = argparse.ArgumentParser(description="Unified Compliance Orchestrator — Genesis 2.0 Track EVA 02")
+    parser.add_argument("--game", choices=["snake", "2048"], default="snake", help="Game to play (default: snake)")
+    parser.add_argument("--mock", action=argparse.BooleanOptionalAction, default=True, help="Run mock offline session")
+    parser.add_argument("--api-key", type=str, default=os.getenv("TOPGAME_API_KEY", ""), help="TopGameAI API key")
+    parser.add_argument("--agent-name", type=str, default="ProgrammablePros", help="Agent display name")
+    parser.add_argument("--max-steps", type=int, default=None, help="Override step cap")
+    parser.add_argument("--allow-stage-override", action="store_true", help="Force run Stage 2 without unlock marker")
+    parser.add_argument("--policy", choices=["repeat_last_applied", "pending_ordinal"], default="repeat_last_applied", help="Step ledger policy")
 
-    print("=" * 60)
-    print("Genesis 2.0 Compliance Simulation — 3-Turn Snake Test")
-    print("=" * 60)
-
-    MOCK_SESSION_ID = f"SIM-{uuid.uuid4().hex[:8].upper()}"
-
-    def _make_snake_state(step_n: int, direction: str = "up") -> dict[str, Any]:
-        return {
-            "board": [[0] * 10 for _ in range(10)],
-            "direction": direction,
-            "score": step_n * 10,
-            "step": step_n,
-            "game_over": step_n >= 3,  # Trigger game-over after step 3
-            "player_pos": [5 + step_n, 5],
-        }
-
-    # Server responses: 1 start + 3 moves + 1 final GET
-    _mock_responses: list[dict[str, Any]] = [
-        {"session_id": MOCK_SESSION_ID, "state": _make_snake_state(0)},
-        {"result": "applied", "state": _make_snake_state(1)},
-        {"result": "applied", "state": _make_snake_state(2)},
-        {"result": "applied", "state": _make_snake_state(3)},
-        {"state": _make_snake_state(3, "up")},
-    ]
-    _mock_idx = 0
-
-    def _mock_post(*args: Any, **kwargs: Any) -> MagicMock:
-        global _mock_idx
-        r = MagicMock()
-        r.status_code = 200
-        r.raise_for_status = lambda: None
-        r.json.return_value = _mock_responses[_mock_idx]
-        _mock_idx += 1
-        return r
-
-    def _mock_get(*args: Any, **kwargs: Any) -> MagicMock:
-        global _mock_idx
-        r = MagicMock()
-        r.status_code = 200
-        r.raise_for_status = lambda: None
-        r.json.return_value = _mock_responses[_mock_idx]
-        _mock_idx += 1
-        return r
-
-    # Use a named tempdir that we manage manually to avoid Windows lock issues
-    tmpdir = tempfile.mkdtemp(prefix="genesis2_test_")
-    try:
-        with (
-            patch("requests.Session.post", side_effect=_mock_post),
-            patch("requests.Session.get", side_effect=_mock_get),
-        ):
-            summary = play_compliant_game(
-                game_type="snake",
-                api_key="mock-key",
-                log_dir=tmpdir,
-                use_mock_laya=True,
-            )
-
-        print(f"\nSession ID   : {summary['session_id']}")
-        print(f"Total Steps  : {summary['total_steps']}")
-        print(f"Fallback Rate: {summary['fallback_rate'] * 100:.1f}%")
-        print(f"Log File     : {summary['log_path']}")
-        print(f"Final State  : {summary['final_state_path']}")
-
-        # -- Verify hash chain programmatically --------------------------------
-        print("\n-- Hash Chain Verification --------------------------")
-        log_file = Path(summary["log_path"])
-        valid, msg = OfficialLogger.verify_log_file(log_file)
-        if valid:
-            print(f"  PASS: {msg}")
-        else:
-            print(f"  FAIL: {msg}")
-            raise SystemExit(1)
-
-        # Print each log line and assert PDF invariants
-        print("\n-- Log Line Summary -")
-        with open(log_file, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                entry = json.loads(raw_line.strip())
-                prob_sum = sum(entry["decision"]["probabilities"].values())
-                print(
-                    f"  Step {entry['step']:>3} | action={entry['action']:<6}"
-                    f" | result={entry['result']:<9}"
-                    f" | source={entry['decision']['source']:<9}"
-                    f" | prob_sum={prob_sum:.6f}"
-                    f" | confidence={entry['decision']['confidence']:.4f}"
-                    f" | hash={entry['hash'][:12]}..."
-                )
-                # Assert every PDF invariant
-                assert entry["result"] in ("applied", "rejected"), \
-                    f"Invalid result: {entry['result']}"
-                assert 0.98 <= prob_sum <= 1.02, \
-                    f"Prob sum out of range: {prob_sum}"
-                assert entry["decision"]["chosen"] == entry["action"], \
-                    f"chosen ({entry['decision']['chosen']}) != action ({entry['action']})"
-                assert entry["decision"]["confidence"] == \
-                    entry["decision"]["probabilities"][entry["action"]], \
-                    "confidence != probabilities[action]"
-                assert entry["decision"]["source"] in ("laya", "fallback"), \
-                    f"Invalid source: {entry['decision']['source']}"
-                assert "decide_ms" in entry["timing"], "Missing decide_ms"
-                assert "api_ms" in entry["timing"], "Missing api_ms"
-                assert "turn_ms" in entry["timing"], "Missing turn_ms"
-
-        print(f"\n[orchestrator_compliance] ALL INVARIANTS PASSED")
-        print(f"  Fallback budget: {summary['fallback_rate'] * 100:.1f}% (<=10% required)")
-
-    finally:
-        # Clean up temp directory (files should be closed by this point)
-        import shutil
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass  # Non-fatal on Windows if handles are still open
+    args = parser.parse_args()
+    run_orchestrated_game(
+        game=args.game,
+        api_key=args.api_key,
+        agent_name=args.agent_name,
+        is_mock=args.mock,
+        max_steps_override=args.max_steps,
+        allow_stage_override=args.allow_stage_override,
+        rejected_step_policy=args.policy,
+    )

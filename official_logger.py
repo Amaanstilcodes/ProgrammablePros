@@ -91,18 +91,26 @@ class OfficialLogger:
         logger.save_final_state("abc123", final_state_dict={...})
     """
 
-    def __init__(self, log_dir: str = ".") -> None:
+    def __init__(self, log_dir: str = ".", default_filename: str | None = None) -> None:
         self._log_dir: Path = Path(log_dir)
         self._log_dir.mkdir(parents=True, exist_ok=True)
+        self._default_filename: str | None = default_filename
 
         # Keyed by session_id
         self._prev_hashes: dict[str, str] = {}
         self._step_counters: dict[str, int] = {}
         self._file_handles: dict[str, Any] = {}
+        self._session_games: dict[str, str] = {}
+        self._active_session_id: str | None = None
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
-    def start_session(self, session_id: str, game_name: str) -> Path:
+    def start_session(
+        self,
+        session_id: str,
+        game_name: str,
+        log_filename: str | None = None,
+    ) -> Path:
         """Initialise a new logging session.
 
         Sets the genesis ``prev_hash`` to ``"GENESIS-{session_id}"`` as per PDF §5.
@@ -110,11 +118,14 @@ class OfficialLogger:
         Args:
             session_id: Unique opaque session identifier returned by game API.
             game_name: "snake" or "2048".
+            log_filename: Optional override for the log file name. Defaults to
+                          ``default_filename`` or ``decision_log_{session_id}.jsonl``.
 
         Returns:
             Absolute path to the opened ``.jsonl`` log file.
         """
-        log_path = self._log_dir / f"decision_log_{session_id}.jsonl"
+        filename = log_filename or self._default_filename or f"decision_log_{session_id}.jsonl"
+        log_path = self._log_dir / filename
         # Close any existing handle for this session before reopening
         if session_id in self._file_handles:
             fh = self._file_handles.pop(session_id)
@@ -123,6 +134,8 @@ class OfficialLogger:
 
         self._prev_hashes[session_id] = f"GENESIS-{session_id}"
         self._step_counters[session_id] = 0
+        self._session_games[session_id] = game_name
+        self._active_session_id = session_id
         self._file_handles[session_id] = open(log_path, "a", encoding="utf-8")
         return log_path.resolve()
 
@@ -132,10 +145,67 @@ class OfficialLogger:
         if fh and not fh.closed:
             fh.flush()
             fh.close()
+        if self._active_session_id == session_id:
+            self._active_session_id = None
 
     # ── Core logging method ───────────────────────────────────────────────────
 
     def log_move(
+        self,
+        *args: Any,
+        session_id: str | None = None,
+        game: str | None = None,
+        step: int | None = None,
+        state_before: dict[str, Any] | None = None,
+        action: str | None = None,
+        state_after: dict[str, Any] | None = None,
+        result: str | None = None,
+        decision: dict[str, Any] | None = None,
+        timing: dict[str, float] | None = None,
+        ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one move line to the JSONL log with a valid SHA-256 hash.
+
+        Supports both positional signature:
+            logger.log_move(state_before, action, state_after, result, decision, timing)
+        and explicit keyword arguments.
+        """
+        # Parse positional arguments if provided
+        if len(args) >= 6:
+            state_before = args[0]
+            action = args[1]
+            state_after = args[2]
+            result = args[3]
+            decision = args[4]
+            timing = args[5]
+
+        # Resolve session context
+        resolved_sid = session_id or self._active_session_id
+        if resolved_sid is None:
+            raise RuntimeError("No active session. Call start_session() before logging.")
+
+        resolved_game = game or self._session_games.get(resolved_sid, "snake")
+        resolved_step = step if step is not None else (self._step_counters.get(resolved_sid, 0) + 1)
+
+        if state_before is None or action is None or state_after is None or result is None or decision is None:
+            raise ValueError("Missing required move attributes for log_move.")
+
+        resolved_timing = timing or {"decide_ms": 0.0, "api_ms": 0.0, "turn_ms": 0.0}
+
+        return self._write_log_line(
+            session_id=resolved_sid,
+            game=resolved_game,
+            step=resolved_step,
+            state_before=state_before,
+            action=action,
+            state_after=state_after,
+            result=result,
+            decision=decision,
+            timing=resolved_timing,
+            ts=ts,
+        )
+
+    def _write_log_line(
         self,
         *,
         session_id: str,
