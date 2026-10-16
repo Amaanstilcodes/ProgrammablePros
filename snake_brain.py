@@ -134,19 +134,37 @@ class SnakeHypothesisBuilder:
 
     DIRECTIONS: List[str] = ["up", "down", "left", "right"]
 
-    def build_hypotheses(self, state: Dict[str, Any], compressed: str = "") -> Dict[str, Dict[str, Any]]:
-        """Return dict of noul typed questions keyed by q_up, q_down, etc."""
+    def build_hypotheses(
+        self,
+        state: Dict[str, Any],
+        subgoal: Any = None,
+        compressed: str = "",
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Return questions for Laya model scoring."""
         parsed = parse_snake_state(state)
         food_pos = parsed["food"]
-        questions: Dict[str, Dict[str, Any]] = {}
+
+        if subgoal is not None and isinstance(subgoal, str) and compressed:
+            # 8-question list format (2 per action: progress and danger) for run_local_games
+            questions: List[str] = []
+            for action in self.DIRECTIONS:
+                q1 = f"Moving '{action}' is legal and progresses toward {subgoal}."
+                q2 = f"Moving '{action}' causes an immediate collision with a wall or snake body."
+                questions.extend([q1, q2])
+            return questions
+
+        questions_dict: Dict[str, Dict[str, Any]] = {}
         for action in self.DIRECTIONS:
-            questions[f"q_{action}"] = {
+            questions_dict[f"q_{action}"] = {
                 "type": "noul",
                 "instructions": (
                     f"Moving '{action}' is legal and progresses toward the food at {food_pos} while staying safe."
                 ),
             }
-        return questions
+        return questions_dict
+
 
     def build_hypothesis_strings(self, state: Dict[str, Any], compressed: str = "") -> List[str]:
         """Return list of question strings for official logging compliance."""

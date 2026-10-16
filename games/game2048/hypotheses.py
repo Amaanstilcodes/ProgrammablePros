@@ -172,7 +172,10 @@ class Board2048HypothesisBuilder:
         features_or_dict: Any,
         subgoal: Any,
         legal_actions: list[str] | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> HypothesisBatch2048:
+
         """Backward-compatibility wrapper for orchestrator."""
         if not isinstance(features_or_dict, Board2048Features):
             extractor = Game2048FeatureExtractor()

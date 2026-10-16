@@ -209,7 +209,10 @@ class SnakeHypothesisBuilder:
         features_or_dict: Any,
         subgoal: Any,
         legal_actions: list[str] | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> HypothesisBatch:
+
         """Backward-compatible entry point for orchestrator and benchmark tools."""
         if not isinstance(features_or_dict, SnakeFeatures):
             extractor = FeatureExtractor()
