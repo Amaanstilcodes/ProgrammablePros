@@ -228,7 +228,11 @@ def render_kpi_row(entries: list[dict], latest: dict, state: dict, game: str) ->
     applied  = sum(1 for e in entries if e.get("result") != "rejected")
     rejected = len(entries) - applied
     if game == "snake":
-        extra_label, extra_val, extra_sub = "Foods", f"{state.get('foods_eaten', 0)}/15", "target"
+        food_eaten = state.get("foodEaten", state.get("foods_eaten", 0)) or 0
+        won = state.get("won", False) or state.get("game_over", False) and food_eaten >= 15
+        real_score = food_eaten * 60 + (100 if won else 0)
+        extra_label, extra_val, extra_sub = "Foods", f"{food_eaten}/15", "target"
+        score = real_score
     else:
         extra_label, extra_val, extra_sub = "Best Tile", str(state.get("best_tile", 0)), "target 512+"
     st.markdown(
@@ -345,16 +349,18 @@ def main() -> None:
         state_q = last.get("state_after", last.get("state_before", {}))
         game_q  = last.get("game", "snake")
         if game_q == "snake":
-            snake_best = max(snake_best, state_q.get("score", 0))
+            fe = state_q.get("foodEaten", state_q.get("foods_eaten", 0)) or 0
+            won_q = state_q.get("won", False) or (state_q.get("game_over", False) and fe >= 15)
+            snake_best = max(snake_best, fe * 60 + (100 if won_q else 0))
         else:
             tile_best = max(tile_best, state_q.get("best_tile", 0))
 
     s1_class = "stage-complete" if snake_best >= 600 else "stage-active"
-    s1_label = f"? Stage 1 Snake — Best {snake_best} pts" if snake_best >= 600 else f"🐍 Stage 1 Snake — Best {snake_best} pts (need 600)"
+    s1_label = f"\u2705 Stage 1 Snake \u2014 Best {snake_best} pts" if snake_best >= 600 else f"\U0001f40d Stage 1 Snake \u2014 Best {snake_best} pts (need 600)"
     s2_class = "stage-complete" if tile_best >= 512 else ("stage-active" if snake_best >= 600 else "stage-locked")
-    s2_label = (f"? Stage 2 2048 — Best tile {tile_best}" if tile_best >= 512
-                else (f"✅ Stage 2 2048 — Best tile {tile_best} (need 512)" if snake_best >= 600
-                      else "✅ Stage 2 2048 — Locked (complete Stage 1 first)"))
+    s2_label = (f"\u2705 Stage 2 2048 \u2014 Best tile {tile_best}" if tile_best >= 512
+                else (f"\U0001f7e2 Stage 2 2048 \u2014 Best tile {tile_best} (need 512)" if snake_best >= 600
+                      else "\U0001f512 Stage 2 2048 \u2014 Locked (complete Stage 1 first)"))
     st.markdown(
         f"""<div style="margin-bottom:18px;">
           <span class="stage-pill {s1_class}">{s1_label}</span>
