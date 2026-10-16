@@ -1,7 +1,7 @@
-"""Configuration Module — Genesis 2.0 Track EVA 02.
+"""Configuration & Runtime Settings — Genesis 2.0 Track EVA 02.
 
-Loads environment variables, .env file, and defines typed configuration dataclasses.
-No hardcoded secrets or environment assumptions.
+Provides frozen, validated Settings loaded from environment variables and .env file.
+Enforces mock quarantine and live safety rules.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 RejectedStepPolicy = Literal["repeat_last_applied", "pending_ordinal"]
+LayaMode = Literal["mock", "local", "http"]
+HypothesisMode = Literal["full", "lean"]
 
 
 def _load_env_file(dotenv_path: Path | None = None) -> None:
@@ -38,43 +40,121 @@ _load_env_file()
 
 
 @dataclass(frozen=True)
-class AppConfig:
-    """Master application configuration."""
+class Settings:
+    """Master application configuration and runtime safety constraints."""
 
-    # Agent identification (Strict rule: MUST be ProgrammablePros)
     agent_name: str = "ProgrammablePros"
+    topgameai_base_url: str = os.getenv("TOPGAMEAI_BASE_URL", os.getenv("TOPGAME_API_URL", "https://topgameai.com/api"))
+    topgameai_api_key: str = os.getenv("TOPGAMEAI_API_KEY", os.getenv("TOPGAME_API_KEY", ""))
 
-    # API endpoints
-    topgame_api_url: str = os.getenv("TOPGAME_API_URL", "https://topgameai.com/api")
-    topgame_api_key: str = os.getenv("TOPGAME_API_KEY", "")
-
-    # Laya settings
-    laya_mode: str = os.getenv("LAYA_MODE", "mock").lower()  # mock | http | local
-    laya_api_url: str = os.getenv("LAYA_API_URL", "")
+    laya_mode: LayaMode = os.getenv("LAYA_MODE", "mock").lower()  # type: ignore[assignment]
+    laya_model_path: str = os.getenv("LAYA_MODEL_PATH", "")
+    laya_endpoint: str = os.getenv("LAYA_ENDPOINT", os.getenv("LAYA_API_URL", ""))
     laya_api_key: str = os.getenv("LAYA_API_KEY", "")
 
-    # Logging & Paths
-    log_root: Path = field(default_factory=lambda: Path(os.getenv("LOG_ROOT", "logs")))
-    quarantine_mock_dir: Path = field(
-        default_factory=lambda: Path(os.getenv("QUARANTINE_DIR", "logs/_mock"))
+    log_root: str = os.getenv("LOG_ROOT", "logs")
+    rejected_step_policy: RejectedStepPolicy = os.getenv(  # type: ignore[assignment]
+        "REJECTED_STEP_POLICY", "repeat_last_applied"
     )
-
-    # Step ledger policy: "repeat_last_applied" (Default, Policy A) or "pending_ordinal" (Policy B)
-    rejected_step_policy: RejectedStepPolicy = os.getenv(
-        "REJECTED_STEP_POLICY", "repeat_last_applied"  # type: ignore[assignment]
-    )
-
-    # Game step limits per official PDF rules
-    snake_max_accepted_steps: int = 300
-    game2048_max_accepted_steps: int = 2000
-
-    # Fallback budget limit (Max 10% of total session moves per PDF §4)
     max_fallback_ratio: float = 0.10
+    probability_decimals: int = 6
+    hypothesis_mode: HypothesisMode = os.getenv("HYPOTHESIS_MODE", "full").lower()  # type: ignore[assignment]
 
-    # Verification threshold for Stage 2 unlock (Snake score >= 600)
-    snake_unlock_score: int = 600
+    snake_max_steps: int = 300
+    game2048_max_steps: int = 2000
+
+    http_timeout_s: float = 10.0
+    http_retries: int = 3
+    http_backoff_s: float = 0.3
+
+    mock_quarantine: bool = True  # Hard enforced
+    unlock_confirmed: bool = False
+    snake_proof_path: str | None = None
+
+    # Backward compatibility properties
+    @property
+    def topgame_api_url(self) -> str:
+        return self.topgameai_base_url
+
+    @property
+    def topgame_api_key(self) -> str:
+        return self.topgameai_api_key
+
+    @property
+    def snake_max_accepted_steps(self) -> int:
+        return self.snake_max_steps
+
+    @property
+    def game2048_max_accepted_steps(self) -> int:
+        return self.game2048_max_steps
+
+    @property
+    def quarantine_mock_dir(self) -> Path:
+        return Path(self.log_root) / "_mock"
+
+    @property
+    def snake_unlock_score(self) -> int:
+        return 600
+
+    def require_live_safety(
+        self,
+        game: str = "snake",
+        is_self_test: bool = False,
+        target_log_path: Path | None = None,
+    ) -> None:
+        """Enforce strict isolation between mock testing and live competition.
+
+        Raises:
+            RuntimeError: if safety constraints are violated.
+        """
+        # Rule 1: mock mode must be self-test
+        if self.laya_mode == "mock" and not is_self_test:
+            raise RuntimeError(
+                "SAFETY VIOLATION: LAYA_MODE='mock' is only permitted during explicit self-test runs."
+            )
+
+        # Rule 2: log path outside logs/_mock while laya_mode == 'mock'
+        if self.laya_mode == "mock" and target_log_path is not None:
+            resolved_target = str(target_log_path.resolve())
+            resolved_mock = str(self.quarantine_mock_dir.resolve())
+            if not resolved_target.startswith(resolved_mock):
+                raise RuntimeError(
+                    f"SAFETY VIOLATION: Mock logs must be quarantined in {self.quarantine_mock_dir}, got {target_log_path}"
+                )
+
+        # Rule 3: 2048 requires unlock confirmation
+        if game == "2048" and not self.unlock_confirmed:
+            raise RuntimeError(
+                "SAFETY VIOLATION: Cannot execute Stage 2 (2048) without explicit unlock_confirmed=True."
+            )
+
+    def redacted(self) -> dict[str, Any]:
+        """Return dict representation with all credentials redacted."""
+        return {
+            "agent_name": self.agent_name,
+            "topgameai_base_url": self.topgameai_base_url,
+            "topgameai_api_key": "[REDACTED]" if self.topgameai_api_key else "",
+            "laya_mode": self.laya_mode,
+            "laya_model_path": self.laya_model_path,
+            "laya_endpoint": self.laya_endpoint,
+            "laya_api_key": "[REDACTED]" if self.laya_api_key else "",
+            "log_root": self.log_root,
+            "rejected_step_policy": self.rejected_step_policy,
+            "max_fallback_ratio": self.max_fallback_ratio,
+            "probability_decimals": self.probability_decimals,
+            "hypothesis_mode": self.hypothesis_mode,
+            "snake_max_steps": self.snake_max_steps,
+            "game2048_max_steps": self.game2048_max_steps,
+            "http_timeout_s": self.http_timeout_s,
+            "mock_quarantine": self.mock_quarantine,
+            "unlock_confirmed": self.unlock_confirmed,
+        }
 
     @classmethod
-    def load(cls, **overrides: Any) -> AppConfig:
-        """Create config merging environment variables with optional explicit overrides."""
+    def load(cls, **overrides: Any) -> Settings:
+        """Load settings with optional runtime overrides."""
         return cls(**overrides)
+
+
+# Alias AppConfig to Settings for full backwards compatibility
+AppConfig = Settings

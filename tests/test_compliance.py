@@ -54,3 +54,40 @@ def test_build_decision_block_invariants() -> None:
     assert block["confidence"] == 0.4
     assert block["source"] == "laya"
     assert block["probabilities"] == norm
+
+
+def test_clients_raise_contract_not_discovered_error() -> None:
+    """Acceptance Criterion A4: Clients raise ContractNotDiscoveredError when endpoints are unverified."""
+    from core.protocols import ContractNotDiscoveredError
+    from games.game2048.client import Game2048Client
+    from games.snake.client import SnakeClient
+
+    snake_client = SnakeClient()
+    with pytest.raises(ContractNotDiscoveredError, match="not yet verified"):
+        snake_client.start_game()
+
+    game2048_client = Game2048Client()
+    with pytest.raises(ContractNotDiscoveredError, match="not yet verified"):
+        game2048_client.start_game()
+
+
+def test_settings_require_live_safety_enforcement(tmp_path: Path) -> None:
+    """Acceptance Criterion A5: Settings.require_live_safety() blocks mock runs outside logs/_mock/ and unconfirmed 2048."""
+    from pathlib import Path
+    from core.config import Settings
+
+    settings_mock = Settings(laya_mode="mock")
+    # Must fail if not self-test
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION"):
+        settings_mock.require_live_safety(is_self_test=False)
+
+    # Must fail if target log path is outside logs/_mock/
+    bad_log_path = tmp_path / "outside_dir" / "test.jsonl"
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION"):
+        settings_mock.require_live_safety(is_self_test=True, target_log_path=bad_log_path)
+
+    # Must fail if game is 2048 and unlock_confirmed is False
+    settings_2048 = Settings(laya_mode="http", unlock_confirmed=False)
+    with pytest.raises(RuntimeError, match="unlock_confirmed=True"):
+        settings_2048.require_live_safety(game="2048", is_self_test=True)
+

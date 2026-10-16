@@ -78,3 +78,8 @@ def test_official_logger_detects_tampering(tmp_path: Path) -> None:
     is_valid, msg = OfficialLogger.verify_log_file(log_file)
     assert is_valid is False
     assert "Hash mismatch" in msg or "Chain break" in msg
+
+    # Also assert that tools/verify_log.py CLI rejects it
+    from tools.verify_log import verify_log
+    assert verify_log(str(log_file)) is False
+
