@@ -143,7 +143,7 @@ def run_live_2048_session(
             if simulated_next == current_board:
                 # Proposed action would produce no board change; select best alternative that does change board
                 found_valid = False
-                for alt_action in ("down", "left", "right", "up"):
+                for alt_action in ("left", "down", "up", "right"):
                     if Board2048EVCalculator.simulate_slide_board(current_board, alt_action) != current_board:
                         final_action = alt_action
                         source = "fallback"
