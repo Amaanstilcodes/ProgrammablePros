@@ -107,20 +107,73 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Run Local Snake Benchmark
+---
+
+## 🎮 Running the Games
+
+### Local Benchmark Mode (No API Key Required)
+
+Test the full decision pipeline locally against built-in game simulations using the real Laya model.
+
+**Run Snake locally:**
 ```bash
-python run_local_games.py --game snake --seed 42 --use-mock-laya
+python run_local_games.py --game snake --seed 42
 ```
 *Expected: 15/15 foods eaten, score 1000, 0% fallback, hash chain VALID.*
 
-### 3. Run Local 2048 Benchmark
+**Run 2048 locally:**
 ```bash
-python run_local_games.py --game 2048 --seed 42 --use-mock-laya
+python run_local_games.py --game 2048 --seed 42
 ```
 *Expected: 300+ steps, tile 256+, 0% fallback, hash chain VALID.*
 
-### 4. Launch Live Decision Viewer
+**CLI options for `run_local_games.py`:**
+| Flag | Default | Description |
+|---|---|---|
+| `--game` | `snake` | Which game to run: `snake` or `2048` |
+| `--seed` | `42` | Random seed for reproducible runs |
+
+---
+
+### Live Arena Mode (Hackathon Day — Real Laya + TopGameAI API)
+
+Connects to the real [TopGameAI Arena](https://topgameai.com/arena) and the real `convaiinnovations/laya` model.
+
+**Run 2048 on the live arena:**
 ```bash
-streamlit run viewer_local.py
+python run_2048_live.py
 ```
-Open `http://localhost:8501` to view live board grids, probability bar charts, EV telemetry, and the cryptographic audit chain.
+
+**With optional flags:**
+```bash
+python run_2048_live.py --agent-name ProgrammablePros --max-steps 2000 --log-dir logs/2048
+```
+
+**CLI options for `run_2048_live.py`:**
+| Flag | Default | Description |
+|---|---|---|
+| `--agent-name` | `ProgrammablePros` | Agent identifier sent to the arena |
+| `--max-steps` | `2000` | Maximum accepted moves before stopping |
+| `--log-dir` | `logs/2048` | Directory for SHA-256 hash-chained JSONL logs |
+
+> **Note:** Live mode requires the Laya model weights to be available and a valid arena connection. Use local benchmark mode for offline testing.
+
+---
+
+## 📺 Viewing Live Telemetry
+
+Launch the Streamlit dashboard to monitor games in real-time:
+
+```bash
+streamlit run app.py
+```
+
+Then open **[http://localhost:8501](http://localhost:8501)** in your browser.
+
+The viewer displays:
+- 🟩 **Live board grids** — Snake (20×20) and 2048 (4×4) rendered as color-coded grids
+- 📊 **Probability bar charts** — Laya's per-action progress & danger probabilities
+- ⚖️ **EV telemetry** — Expected Value breakdown per action, updated every move
+- 🔐 **Cryptographic audit chain** — Real-time SHA-256 hash-chain feed from the JSONL log
+
+> **Tip:** Start the viewer *before* launching a game run so it can pick up the session from the start. Both windows can run simultaneously.

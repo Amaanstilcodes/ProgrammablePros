@@ -38,7 +38,7 @@ from game2048_brain import (
     Board2048HypothesisBuilder,
     parse_2048_state,
 )
-from game_clients import Game2048Client, MoveResult
+from game_clients import Game2048Client, GameAPIError, MoveResult
 from laya_agent import LayaAgent
 from official_logger import OfficialLogger
 
@@ -177,13 +177,23 @@ def run_live_2048_session(
                 source=source,
             )
 
-            # H. Dispatch Move to the REAL TopGameAI Arena
+            # Circuit-breaker: instant abort on HTTP 500 (session dead server-side)
             api_start = time.perf_counter()
-            move_res: MoveResult = client.send_move(
-                session_id=session_id,
-                action=final_action,
-                state_before=state_before,
-            )
+            try:
+                move_res: MoveResult = client.send_move(
+                    session_id=session_id,
+                    action=final_action,
+                    state_before=state_before,
+                )
+            except GameAPIError as _ge:
+                if _ge.status_code >= 500:
+                    print(
+                        f"[!] FATAL: Session corrupted on server (HTTP {_ge.status_code}). "
+                        "Aborting this session to prevent infinite loops."
+                    )
+                    game_over = True
+                    break
+                raise  # propagate 400, 404, etc.
             api_ms = (time.perf_counter() - api_start) * 1000.0
             turn_ms = (time.perf_counter() - turn_start) * 1000.0
 

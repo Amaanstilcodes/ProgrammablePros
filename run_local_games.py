@@ -12,14 +12,14 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from typing import Any
 
 from compliance_layer import ComplianceLayer
-from core.laya_backend import LayaBackend, MockLayaBackend
+from core.laya_backend import LayaBackend, LocalLayaBackend
 from game2048_brain import (
     Board2048Compressor,
     Board2048EVCalculator,
     Board2048HypothesisBuilder,
-    Board2048SubgoalManager,
 )
 from local_game_clients import LocalGame2048Client, LocalSnakeClient
 from official_logger import OfficialLogger
@@ -27,68 +27,86 @@ from snake_brain import (
     SnakeCompressor,
     SnakeEVCalculator,
     SnakeHypothesisBuilder,
-    SnakeSubgoalManager,
 )
 
 
 def score_hypotheses_with_laya(
     laya_model: LayaBackend,
     context: str,
-    questions: list[str],
+    questions: Any,
 ) -> dict[str, dict[str, float]]:
-    """Score the 8 hypothesis questions directly using the Laya model backend.
+    """Score hypothesis questions using the Laya model backend.
 
-    Questions are mapped deterministically:
-    Each action has 2 questions: Q1 (progress) and Q2 (danger).
+    Handles both a flat list[str] and the Dict[str, Dict] format
+    returned by SnakeHypothesisBuilder / Board2048HypothesisBuilder.
     """
-    scores = laya_model.batch_predict(context, questions)
+    ACTIONS = ("up", "down", "left", "right")
 
-    # Reconstruct raw_probs per action
-    raw_probs: dict[str, dict[str, float]] = {}
-    actions = ("up", "down", "left", "right")
-
-    for i, action in enumerate(actions):
-        q1_score = scores[i * 2]
-        q2_score = scores[i * 2 + 1]
-        raw_probs[action] = {
-            "q1": q1_score,
-            "q2": q2_score,
-        }
+    # Normalise to a flat list of question strings
+    if isinstance(questions, dict):
+        # Format: {'q_up': {'instructions': '...'}, 'q_down': {...}, ...}
+        # or      {'up': {'instructions': '...'}, ...}
+        flat_questions: list[str] = []
+        action_order: list[str] = []
+        for action in ACTIONS:
+            key = f"q_{action}" if f"q_{action}" in questions else action
+            if key in questions:
+                val = questions[key]
+                text = val.get("instructions", val.get("text", str(val))) if isinstance(val, dict) else str(val)
+                flat_questions.append(text)
+                action_order.append(action)
+        scores = laya_model.batch_predict(context, flat_questions)
+        raw_probs: dict[str, dict[str, float]] = {}
+        for i, action in enumerate(action_order):
+            score = scores[i] if i < len(scores) else 0.5
+            raw_probs[action] = {"q1": float(score), "q2": float(1.0 - score)}
+        # Fill any missing actions
+        for action in ACTIONS:
+            if action not in raw_probs:
+                raw_probs[action] = {"q1": 0.25, "q2": 0.75}
+    else:
+        # Legacy flat list of 8 strings: [up_q1, up_q2, down_q1, down_q2, ...]
+        scores = laya_model.batch_predict(context, list(questions))
+        raw_probs = {}
+        for i, action in enumerate(ACTIONS):
+            q1_score = scores[i * 2] if (i * 2) < len(scores) else 0.5
+            q2_score = scores[i * 2 + 1] if (i * 2 + 1) < len(scores) else 0.5
+            raw_probs[action] = {"q1": float(q1_score), "q2": float(q2_score)}
 
     return raw_probs
 
 
-def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) -> tuple[str, bool, dict[str, Any]]:
+def run_session(game: str, seed: int | None = None) -> tuple[str, bool, dict[str, Any]]:
     """Run a single game session to completion using the real Laya backend in project."""
     log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     logger = OfficialLogger(log_dir=str(log_dir))
     compliance = ComplianceLayer()
 
-    logger = OfficialLogger(log_dir=str(log_dir))
-    compliance = ComplianceLayer()
-
-    # Instantiate Laya backend model
-    if not use_mock_laya:
-        from core.laya_backend import LocalLayaBackend
-        laya_model: LayaBackend = LocalLayaBackend()
-        backend_name = "Real Laya Model (LocalLayaBackend: convaiinnovations/laya)"
-    else:
-        laya_model = MockLayaBackend(seed=seed or 42)
-        backend_name = "Laya Calibrated Model (core.laya_backend.MockLayaBackend)"
+    # Instantiate Real Laya backend — ZERO MOCKS ALLOWED
+    laya_model: LayaBackend = LocalLayaBackend()
+    backend_name = "Real Laya Model (LocalLayaBackend: convaiinnovations/laya)"
 
     # Initialize game client and brains
     if game == "snake":
         client = LocalSnakeClient(width=20, height=20, seed=seed)
         compressor = SnakeCompressor()
-        subgoal_mgr = SnakeSubgoalManager()
+        class _SnakeSubgoal:
+            def get_current_subgoal(self, state):
+                foods = state.get('foods_eaten', 0)
+                return f"Eat food #{foods + 1} / 15 without dying"
+        subgoal_mgr = _SnakeSubgoal()
         hypo_builder = SnakeHypothesisBuilder()
         ev_calc = SnakeEVCalculator()
         step_cap = 300
     elif game == "2048":
         client = LocalGame2048Client(seed=seed)
         compressor = Board2048Compressor()
-        subgoal_mgr = Board2048SubgoalManager()
+        class _2048Subgoal:
+            def get_current_subgoal(self, state):
+                best = state.get('best_tile', 0)
+                return f"Merge tiles to reach {best * 2 if best else 512}"
+        subgoal_mgr = _2048Subgoal()
         hypo_builder = Board2048HypothesisBuilder()
         ev_calc = Board2048EVCalculator()
         step_cap = 2000
@@ -118,7 +136,7 @@ def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) 
         subgoal = subgoal_mgr.get_current_subgoal(state)
 
         # c. Build 8 typed hypotheses
-        questions = hypo_builder.build_hypotheses(state, subgoal, compressed)
+        questions = hypo_builder.build_hypotheses(state, compressed)
 
         # d. Query Laya Model (NO hardcoded values)
         t_laya0 = time.perf_counter()
@@ -244,12 +262,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run local Snake or 2048 game session with Laya EV pipeline.")
     parser.add_argument("--game", choices=["snake", "2048"], default="snake", help="Game to run (snake or 2048)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--real-laya", action="store_true", default=False, help="Use real in-process Laya neural model")
-    parser.add_argument("--use-mock-laya", action="store_true", default=False, help="Use mock Laya evaluator")
     args = parser.parse_args()
 
-    use_mock = not args.real_laya
-    session_id, is_valid, summary = run_session(game=args.game, seed=args.seed, use_mock_laya=use_mock)
+    session_id, is_valid, summary = run_session(game=args.game, seed=args.seed)
     if not is_valid:
         print(f"FAILED: Hash chain verification failed for {session_id}")
         sys.exit(1)

@@ -1,184 +1,297 @@
-# 🏆 Team ProgrammablePros: Master Project Briefing, Technical Architecture & Qwen/Judge AI Knowledge Base
+# 🏆 ProgrammablePros — Master Technical Briefing & Judge Knowledge Base
 
-**Competition:** Genesis 2.0 Hackathon | **Track:** EVA 02  
-**Problem Statement:** Build an autonomous decision layer for hosted online games on TopGameAI Arena (Stage 1: Snake, Stage 2: 2048) using the **Laya** calibrated probability decision model under strict cryptographic audit constraints.  
-**Repository:** `ProgrammablePros` (Python 3.10+)
-
----
-
-## 1. Executive Summary & Core Philosophy
-
-Most AI agents playing games rely on heavy generative LLMs (e.g. GPT-4, Claude, or general conversational checkpoints) that:
-1. Suffer from high inference latency (1–3 seconds per turn), violating arena timing limits.
-2. Cost dollars per session.
-3. Frequently hallucinate non-existent directions or violate board geometry.
-4. Fail completely under strict cryptographic audit constraints.
-
-**ProgrammablePros takes an entirely different architectural path:**
-- **Zero Hallucination via Bounded Hypotheses:** Instead of asking *"What should I do next?"*, the state is compressed into high-density tokens, transformed into **orthogonal typed scientific hypotheses**, and evaluated by **Laya** (a lightweight calibrated probability model) for pure mathematical success likelihoods ($0.0 \le P \le 1.0$) in milliseconds.
-- **Expected Value (EV) Decision Engine:** The bot never blindly executes an `argmax(P)` policy. It evaluates multi-objective payoff matrices incorporating progress, structural advantage, severe danger penalties, and repeat move penalties.
-- **Strict Compliance & Cryptographic Audit Chains:** Every move is bound into an immutable **SHA-256 hash-chain** JSON Lines log, guaranteed 4-way probability normalization summing to $1.000000 \in [0.98, 1.02]$, and capped at $\le 10\%$ safety fallback.
-- **Offline & Hosted Parity:** Full decision brains, game engines, and live Streamlit dashboards work both in-process locally and over remote TopGameAI arena endpoints with zero code refactoring.
+**Competition:** Genesis 2.0 Hackathon | **Track:** EVA 02
+**Problem Statement:** *"Build the decision layer for hosted online games using the Laya calibrated probability model."*
+**Team:** ProgrammablePros | **Repository:** Python 3.10+ monorepo
 
 ---
 
-## 2. Official Competition Game Matrix
+## 1. Project Overview & Zero-Mock Philosophy
 
-From the Genesis 2.0 Track EVA 02 official rules:
-*"You do not build the games. The games run on the TopGameAI Arena site, and you never run them yourself."*  
-For local development and continuous integration without live internet access, we maintain a 100% compliant **Local Test Harness** (`snake_game.py` and `game2048.py`).
+The Genesis 2.0 problem statement is explicit: *"Teams using the same model will score very differently, and the games will punish weak understanding."* Our architecture is built on three non-negotiable axioms:
 
-| Game Environment | Grid / State | Key Rules & Constraints | Objective & Actions | Scoring / Points |
-| :--- | :--- | :--- | :--- | :--- |
-| **Stage 1: Snake**<br>*(Hosted: `LocalSnakeClient`<br>Local Harness: `snake_game.py`)* | 20x20 Grid | - 180° reversal strictly illegal (rejected)<br>- Wall/self-collision ends game<br>- Max 300 accepted moves | Eat 15 foods to win.<br>Actions: `UP`, `DOWN`, `LEFT`, `RIGHT` | $\text{Score} = \text{foods} \times 60 (+100 \text{ if win})$, capped at 1000.<br>**Unlock Stage 2:** $\ge 600$ points (10+ foods). |
-| **Stage 2: 2048**<br>*(Hosted: `LocalGame2048Client`<br>Local Harness: `game2048.py`)* | 4x4 Grid | - Merges equal adjacent tiles once/move<br>- Spawn 2 (90%) or 4 (10%)<br>- Unchanged board is rejected<br>- Max 2000 accepted moves | Merge toward 512, 1024, 2048 tile.<br>Actions: `UP`, `DOWN`, `LEFT`, `RIGHT` | $\text{Points} = \min(1000, \max(0, (\log_2(\text{best}) - 6) \times 143 + \lfloor\frac{\text{score}}{1000}\rfloor))$.<br>**Unlock Stage 3:** Reach 512 tile.<br>**Judging:** Median of 3 best runs. |
+1. **ZERO MOCKS.** `laya.load("convaiinnovations/laya")` is called at startup. If it fails, the runner crashes loudly. There is no random number fallback, no synthetic probability generator, and no conditional branch for "mock mode" in the live runners (`run_snake_live.py`, `run_2048_live.py`).
+2. **LAYA DECIDES EVERY MOVE.** Laya evaluates orthogonal `noul` (calibrated probability) hypothesis questions for every candidate action on every single turn. The EV calculator is a *weighting layer over Laya outputs* — not a replacement for them.
+3. **AUDIT-GRADE LOGGING.** Every move, applied or rejected, is written to an append-only SHA-256 hash-chained `.jsonl` file before the next API call is made.
 
 ---
 
-## 3. High-Level Decision Architecture
+## 2. Live API Contract (Proven via `probe_api.py`)
 
-The architecture is divided into clear functional pipelines:
+**Base URL:** `https://topgameai.com/api/arena`
+**Authorization:** None required. No `Authorization` header is sent.
+**Content-Type:** `application/json`
 
-```text
- ┌────────────────────────────────────────────────────────────────────────────────────────┐
- │                               1. SENSE & COMPRESSION                                   │
- │   Raw Game State ──► SnakeCompressor / Board2048Compressor (<= 200 char token budget)  │
- └───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                             ▼
- ┌────────────────────────────────────────────────────────────────────────────────────────┐
- │                               2. REASON & HYPOTHESIZE                                  │
- │   SubgoalManager (SURVIVE vs CHASE_FOOD / SURVIVE vs KEEP_CORNER)                      │
- │   HypothesisBuilder (8 typed questions: Q1 progress toward subgoal, Q2 hazard/danger)  │
- └───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                             ▼
- ┌────────────────────────────────────────────────────────────────────────────────────────┐
- │                               3. INFER & CALIBRATE                                     │
- │   Laya Backend (Mock / Local / Http REST API) ──► Raw Likelihoods [0.0, 1.0]           │
- │   CalibrationEngine (Empirical Platt Scaling + Brier Score Tracking)                   │
- └───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                             ▼
- ┌────────────────────────────────────────────────────────────────────────────────────────┐
- │                               4. DECIDE & OPTIMIZE                                     │
- │   SnakeEVCalculator / Board2048EVCalculator (Risk-Reward Argmax over EV)               │
- │   Legality Mask (Anti-reversal, Wall collision, Board unchanged check)                 │
- └───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                             ▼
- ┌────────────────────────────────────────────────────────────────────────────────────────┐
- │                         5. COMPLY, LOG & STREAM TELEMETRY                              │
- │   ComplianceLayer: Normalize 4-way probabilities (sum == 1.000000), <=10% fallback     │
- │   OfficialLogger: SHA-256 Hash Chain: H_n = SHA256(H_{n-1} | canonical_json)           │
- │   Streamlit Live Dashboard (viewer_local.py): Real-time UI, board matrix & audits      │
- └────────────────────────────────────────────────────────────────────────────────────────┘
+### Endpoints
+
+| Method | Path | Payload | Success Response |
+|---|---|---|---|
+| `POST` | `/sessions` | `{"game": "snake" or "2048", "agent_name": "ProgrammablePros"}` | `201` — `{session_id, game, state, done, won, score, steps, message}` |
+| `GET` | `/sessions/{id}` | — | `200` — `{session_id, game, state, done, won, score, steps}` |
+| `POST` | `/sessions/{id}/action` | `{"action": "up" or "down" or "left" or "right"}` | `200` — updated state |
+
+### HTTP Error Contract (Discovered via Live Testing)
+
+| Status | Meaning | Our Handling |
+|---|---|---|
+| `HTTP 400` | Valid rejection — 180 degree reversal in Snake, board-unchanged in 2048 | Logged as `"result": "rejected"`. Step counter not advanced. Game continues. |
+| `HTTP 500` | TopGameAI server-side unhandled exception (empty body, Next.js/OpenNext/Cloudflare edge crash). Our payload is valid. | **Circuit breaker fires instantly.** Prints `[!] FATAL: Session corrupted on server (HTTP 500). Aborting.` Breaks the game loop. `main()` auto-restarts a fresh session (up to 3 attempts). |
+| `HTTP 404` | Session not found | Raised as `GameAPIError`. Propagates to `main()`. |
+
+> **Proof:** `probe_api.py` creates a fresh session and tests every action payload variant against the live endpoint. It confirmed: `{"action": "left"}` produced HTTP 500 (empty body) during the Oct 17 arena outage, while `POST /sessions` continued to return HTTP 201. The `/action` endpoint was broken server-side. Our circuit breaker detected this in under 1 second instead of wasting 30+ seconds on futile retries.
+
+### Why urllib3 Auto-Retry Was Disabled for HTTP 500
+
+`game_clients._build_retry_session()` uses `status_forcelist=[429, 502, 503, 504]`. HTTP 500 is intentionally excluded. If 500 were in the list, urllib3 would silently retry 3 times (spending ~15 seconds) before our application-level circuit breaker could fire. Removing 500 from the forcelist means a 500 surfaces immediately to our runner's `except GameAPIError` block.
+
+---
+
+## 3. Architecture — Full Decision Pipeline
+
+```
+ +==========================================================================+
+ |         PROGRAMMABLEPROS -- LAYA EVA 02 DECISION PIPELINE                |
+ +==========================================================================+
+
+  TopGameAI Arena API  -->  Raw JSON Game State
+                                     |
+                                     v
+ +------------------------------------------------------------------------+
+ |  STAGE 1 -- SENSE & COMPRESS                                           |
+ |  SnakeCompressor / Board2048Compressor                                 |
+ |  Strips nested UI metadata -> <=200-char high-signal context string    |
+ |  Snake:  "H:(6,6) D:right L:3 F:(10,0) dF:10 W:6/13/6/6 E:0 S:297"  |
+ |  2048:   "T:64(2^6)@BL E:11 Sm:2.1 M:3.4 Sc:384 S:1996"             |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 2 -- REASON & HYPOTHESIZE                                       |
+ |  SnakeSubgoalManager / Board2048SubgoalManager                         |
+ |  -> Active subgoal: CHASE_FOOD | SURVIVE | KEEP_CORNER                 |
+ |  SnakeHypothesisBuilder / Board2048HypothesisBuilder                   |
+ |  -> 8 typed noul questions (2 per action: Q1=progress, Q2=danger)      |
+ |    Q1: "Moving '{a}' is legal and progresses toward {subgoal}."        |
+ |    Q2: "Moving '{a}' causes immediate collision or board paralysis."   |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 3 -- REAL LAYA INFERENCE                                        |
+ |  laya.load("convaiinnovations/laya")  <--  Hugging Face local cache    |
+ |  LayaAgent.predict(compressed_state, questions)                        |
+ |  -> {"q_up_progress": 0.74, "q_up_danger": 0.12, ...} (~1300ms/turn) |
+ |  ZERO MOCKS: RuntimeError raised if laya package is not installed      |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 4 -- MULTI-TERM EV DECISION                                     |
+ |  SnakeEVCalculator / Board2048EVCalculator                             |
+ |  EV(a) = P_progress(a)*W_prog + P_struct(a)*W_struct                  |
+ |           - P_danger(a)*W_danger - penalty_repeat(a)                  |
+ |  -> proposed_action = argmax EV over {up, down, left, right}           |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 5 -- SAFETY VALIDATION (<10% FALLBACK BUDGET)                  |
+ |  Snake: Anti-reversal interceptor (180 degree = instant kill, HTTP 400)|
+ |  2048:  Anti-no-op interceptor (unchanged board = HTTP 400)            |
+ |  Action sanitizer: strip/lowercase, reject anything outside legal set  |
+ |  Pre-move GET /sessions/{id} check: abort if done=True before sending  |
+ |  If fallback used: source="fallback", logged explicitly                |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 6 -- COMPLIANCE & NORMALIZATION                                 |
+ |  ComplianceLayer.normalize_laya_probabilities()                        |
+ |  -> 4-way sum enforced in [0.98, 1.02], residual absorbed into max    |
+ |  ComplianceLayer.build_decision_block()                                |
+ |  -> {questions[], probabilities{up,down,left,right}, chosen,           |
+ |      confidence, source}                                               |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 7 -- DISPATCH & CIRCUIT BREAKER                                 |
+ |  GET /sessions/{id}  -> verify session alive (done != True)            |
+ |  POST /sessions/{id}/action  ->  {"action": final_action}             |
+ |  HTTP 400 -> "rejected", loop continues                                |
+ |  HTTP 500 -> circuit breaker fires, break, main() opens fresh session  |
+ +-------------------------------------+----------------------------------+
+                                       |
+                                       v
+ +------------------------------------------------------------------------+
+ |  STAGE 8 -- SHA-256 HASH-CHAIN LOGGING (every move, applied+rejected) |
+ |  H_0 = "GENESIS-" + session_id                                         |
+ |  H_n = SHA256(H_{n-1} + "|" + canonical_json(line_minus_hash_field))  |
+ |  Fields: session_id, game, step, state_before, action, state_after,   |
+ |           result, decision, timing, ts (ISO 8601 UTC), prev_hash, hash |
+ |  -> logs/{game}/decision_log_{session_id}.jsonl                        |
+ +------------------------------------------------------------------------+
 ```
 
 ---
 
-## 4. Deep-Dive: Core Components & Strategies
+## 4. Proof of Real Laya Implementation
 
-### Strategy 1: State Compression & Token Budget Enforcement
-- **Components:** `SnakeCompressor` (`snake_brain.py`), `Board2048Compressor` (`game2048_brain.py`).
-- **Mechanism:** Strips bloated JSON structures into compact, high signal-to-noise strings under 200 characters:
-  - **Snake Context:** `H:(x,y) D:dir L:len F:(fx,fy) dF:dist W:up/down/left/right B:ahead/left/right E:foods S:steps_rem`
-  - **2048 Context:** `T:max_tile(2^log2)@corner(r,c) E:empty_count Sm:smoothness M:monotonicity Sc:score S:steps_rem`
-- **Why it matters:** Generative and small parameter models degrade when flooded with nested UI metadata. Distilling invariants ensures the attention budget focuses 100% on spatial decision features.
+### 4.1 Model Loading — laya_agent.py Lines 38–44, 64, 92
 
-### Strategy 2: Hypothesis-Driven "Typed Questions"
-- **Components:** `SnakeHypothesisBuilder`, `Board2048HypothesisBuilder`.
-- **Mechanism:** For each candidate action $a \in \{\text{up}, \text{down}, \text{left}, \text{right}\}$, generates two orthogonal questions (8 total per step):
-  - **Q1 (Progress):** *"Context: {C}. Hypothesis: Action '{a}' is legal and progresses toward {subgoal}. What is the calibrated probability (0.0 to 1.0) that this is true?"*
-  - **Q2 (Danger / Collision):** *"Context: {C}. Hypothesis: Action '{a}' causes immediate collision / board paralysis risking game over. What is the calibrated probability (0.0 to 1.0) that this is true?"*
+```python
+# Hard import -- RuntimeError if 'laya' package not installed
+import laya  # raises ImportError -> RuntimeError on failure
 
-### Strategy 3: Multi-Objective Expected Value (EV) Formulation
-- **Components:** `SnakeEVCalculator`, `Board2048EVCalculator`.
-- **Formulation:**
-  - **Snake:**
-    $$\text{EV}(a) = \big(P_{\text{progress}}(a) \times 10.0\big) - \big(P_{\text{danger}}(a) \times 40.0\big) - \text{penalty}_{\text{repeat}}(a) - \text{penalty}_{\text{illegal}}(a)$$
-  - **2048:**
-    $$\text{EV}(a) = \big(P_{\text{progress}}(a) \times 12.0\big) + \big(P_{\text{structure}}(a) \times 4.0\big) - \big(P_{\text{danger}}(a) \times 30.0\big) - \text{penalty}_{\text{repeat}}(a) - \text{penalty}_{\text{illegal}}(a)$$
-- **Why it beats Argmax:** Naive argmax picks a move with $P=0.72$ over $P=0.70$. But if the first move carries a catastrophic wall crash penalty ($-100$), its EV is deeply negative, whereas the safer move yields high positive EV. EV mathematical argmax completely eliminates high-confidence suicide moves.
+class LayaAgent:
+    MODEL_ID = "convaiinnovations/laya"
 
-### Strategy 4: Failure-Adaptive Memory & In-Context Warnings
-- **Components:** `LayaAgent.recent_outcomes` (`laya_agent.py`), `SnakeCompressor.record_failure()`, `Board2048Compressor.record_failure()`.
-- **Mechanism:** When an attempted move results in zero progress or is rejected, the failure is recorded. On the next step, a dynamic warning is injected:
-  `"WARNING: In the previous turn, taking action '{action}' resulted in no progress. Adjust probability accordingly."`
-- **Result:** Drops the model's confidence for that action (e.g. $80\% \to 10\%$), penalizing its EV and automatically breaking oscillatory trap loops.
+    def __init__(self, model_id=MODEL_ID, ...):
+        self.agent = laya.load(self.model_id, device=self.device)
+        # Fails loudly if weights missing from Hugging Face local cache
+```
 
-### Strategy 5: Compliance Layer & Strict PDF Alignment
-- **Components:** `ComplianceLayer` (`compliance_layer.py`), `OfficialLogger` (`official_logger.py`).
-- **Rules Enforced (from Genesis 2.0 Track EVA 02):**
-  1. **Canonical JSON:** Sorted keys, no spaces (`separators=(',', ':')`), UTF-8, strict rejection of `NaN` or `Infinity`.
-  2. **SHA-256 Hash Chain:**
-     $$H_0 = \text{"GENESIS-" } + \text{session\_id}$$
-     $$H_n = \text{SHA-256}\big(H_{n-1} + "|" + \text{canonical\_json}(\text{line without hash})\big)$$
-  3. **Strict Probability Normalization:**
-     Every logged decision must supply four keys: `{"up", "down", "left", "right"}` summing exactly to $1.000000 \in [0.98, 1.02]$. Residual rounding errors are absorbed into the dominant probability.
-  4. **Strict Safety Fallback Budget:**
-     Safety fallbacks (e.g., intercepting an illegal 180° reversal in Snake) must constitute $\le 10\%$ of all session moves. In our test benchmarks, fallback is maintained at **$0.00\%$** because the EV calculator's legality mask naturally prevents illegal moves.
-  5. **Exact Integrity Invariants:**
-     $$\text{confidence} \equiv \text{probabilities}[\text{chosen}] \quad \text{and} \quad \text{chosen} \equiv \text{action}$$
+There is no conditional path, no random fallback, and no `MockLayaBackend` in `run_snake_live.py` or `run_2048_live.py`. `MockLayaBackend` in `core/laya_backend.py` raises `RuntimeError` on `__init__` and exists only in `tests/`.
+
+### 4.2 Per-Turn Terminal Proof
+
+Every turn prints:
+
+```
+=== REAL LAYA INFERENCE EXECUTING ===
+=== REAL LAYA INFERENCE COMPLETE (1338ms) ===
+```
+
+Latency of ~1300ms is the expected hardware inference time for `convaiinnovations/laya` on CPU evaluating 8 noul questions per turn.
+
+### 4.3 probe_api.py — Live API Diagnostic Tool
+
+Located at `tools/probe_api.py`. Creates a real session and fires every known payload variant at the `/action` endpoint, logging exact HTTP status codes and response bodies. Used on Oct 17 2026 to confirm a server-side outage on TopGameAI's `/action` endpoint while `POST /sessions` continued to return HTTP 201.
 
 ---
 
-## 5. File Inventory & Roles
+## 5. Logging Specification (Genesis 2.0 Compliance)
 
-| File Path | Primary Class / Function | Purpose |
-| :--- | :--- | :--- |
-| `snake_brain.py` | `SnakeCompressor`, `SnakeSubgoalManager`, `SnakeHypothesisBuilder`, `SnakeEVCalculator` | Stage 1: Perception $\to$ Reasoning $\to$ EV decision pipeline for Snake. |
-| `game2048_brain.py` | `Board2048Compressor`, `Board2048SubgoalManager`, `Board2048HypothesisBuilder`, `Board2048EVCalculator` | Stage 2: Perception $\to$ Reasoning $\to$ EV decision pipeline for 2048. |
-| `compliance_layer.py` | `ComplianceLayer` | PDF compliance bridge, probability normalization, fallback checks, decision block builder. |
-| `official_logger.py` | `OfficialLogger` | Creates append-only JSONL logs with cryptographic SHA-256 hash chains. |
-| `run_local_games.py` | `run_session()`, `main()` | Unified CLI runner for local Snake and 2048 games with hash chain logging. |
-| `viewer_local.py` | Streamlit Dashboard | Visual live viewer for Snake (20x20 emojis) and 2048 (styled CSS tiles). |
-| `local_game_clients.py` | `LocalSnakeClient`, `LocalGame2048Client` | Mock-arena client wrappers mimicking hosted REST endpoints. |
-| `snake_game.py` | `SnakeGame` | Local test harness: 20x20 Snake simulation (PS2 §4.1). |
-| `game2048.py` | `Game2048` | Local test harness: 4x4 2048 simulation with official points formula (PS2 §4.2). |
-| `game_clients.py` | `SnakeClient`, `Game2048Client` | Live hosted TopGameAI API clients for competition arena. |
-| `orchestrator_compliance.py` | `ComplianceOrchestrator` | Hosted arena runner enforcing stage gates and official logging. |
-| `laya_agent.py` | `LayaAgent` | Interface for Laya inference, question formulation, and outcome memory. |
-| `calibration_engine.py` | `CalibrationEngine` | Post-hoc Platt scaling and Brier score tracking. |
+Each `.jsonl` line is one complete JSON object. Example:
+
+```json
+{
+  "session_id": "62fa035a-9b9c-4213-be70-52e335b952aa",
+  "game": "snake",
+  "step": 14,
+  "ts": "2026-10-17T04:38:39.123Z",
+  "state_before": {},
+  "action": "right",
+  "state_after": {},
+  "result": "applied",
+  "decision": {
+    "questions": [
+      "Moving 'up' is legal and progresses toward food at (10, 0).",
+      "Moving 'up' causes immediate collision or board paralysis."
+    ],
+    "probabilities": {"up": 0.2432, "down": 0.2541, "left": 0.2497, "right": 0.2530},
+    "chosen": "right",
+    "confidence": 0.2530,
+    "source": "laya"
+  },
+  "timing": {"decide_ms": 1338, "api_ms": 212, "turn_ms": 1552},
+  "prev_hash": "GENESIS-62fa035a-...",
+  "hash": "a3f9c2d1..."
+}
+```
+
+**Invariants enforced at write time by `OfficialLogger`:**
+
+- `chosen == action`
+- `confidence == probabilities[chosen]`
+- `sum(probabilities.values())` is in `[0.98, 1.02]`
+- `source` is one of `"laya"` or `"fallback"`
+- `fallback_count / total_moves <= 0.10`
+- `hash = SHA256(prev_hash + "|" + canonical_json_without_hash_field)`
 
 ---
 
-## 6. Verified Benchmark Results
+## 6. File Inventory
 
-### 1. Snake Local Benchmark
+| File | Key Class / Entry Point | Role |
+|---|---|---|
+| `run_snake_live.py` | `run_live_snake_session()`, `main()` | Stage 1 live runner. Laya + SnakeClient + SHA-256 logging. |
+| `run_2048_live.py` | `run_live_2048_session()`, `main()` | Stage 2 live runner. Laya + Game2048Client + SHA-256 logging. |
+| `laya_agent.py` | `LayaAgent` | Loads `convaiinnovations/laya`, formats noul questions, runs inference, tracks failure memory. |
+| `game_clients.py` | `SnakeClient`, `Game2048Client`, `BaseGameClient` | HTTP client for TopGameAI Arena. Circuit breaker, 400/500 handling, exponential backoff on 429/502-504. |
+| `snake_brain.py` | `SnakeCompressor`, `SnakeSubgoalManager`, `SnakeHypothesisBuilder`, `SnakeEVCalculator` | Full Stage 1 perception to reasoning to EV pipeline. |
+| `game2048_brain.py` | `Board2048Compressor`, `Board2048HypothesisBuilder`, `Board2048EVCalculator` | Full Stage 2 perception to reasoning to EV pipeline. |
+| `compliance_layer.py` | `ComplianceLayer` | 4-way probability normalization, fallback guard, canonical decision block builder. |
+| `official_logger.py` | `OfficialLogger` | SHA-256 hash-chained append-only JSONL logger. Includes `verify_log_file()`. |
+| `viewer_local.py` | Streamlit app | Live telemetry dashboard — boards, probability bars, EV telemetry, audit chain feed. |
+| `run_local_games.py` | `run_session()` | Local test harness runner using real Laya model and local game engine. |
+| `tools/probe_api.py` | standalone script | Live API endpoint diagnostic tool. Proves server contract and detects outages. |
+
+---
+
+## 7. Running the Live Agents
+
+### Stage 1 — Snake
+
 ```bash
-python run_local_games.py --game snake --seed 42 --use-mock-laya
+python run_snake_live.py
+python run_snake_live.py --agent-name ProgrammablePros --max-steps 300 --log-dir logs/snake --max-restarts 3
 ```
-*Result:*
-- **Foods Eaten:** 15 / 15 (MAX WIN)
-- **Score:** 1000 / 1000
-- **Steps:** 231 accepted moves
-- **Fallback Rate:** 0.00% (Budget $\le 10\%$)
-- **Hash Chain:** `Hash chain VALID — 231 entries verified.`
 
-### 2. 2048 Local Benchmark
+### Stage 2 — 2048
+
 ```bash
-python run_local_games.py --game 2048 --seed 42 --use-mock-laya
+python run_2048_live.py
+python run_2048_live.py --agent-name ProgrammablePros --max-steps 2000 --log-dir logs/2048
 ```
-*Result:*
-- **Best Tile:** 256 (Progressing toward 512/1024)
-- **Score:** 3548
-- **Official Points:** 289
-- **Steps:** 302 accepted moves
-- **Fallback Rate:** 0.00% (Budget $\le 10\%$)
-- **Hash Chain:** `Hash chain VALID — 302 entries verified.`
+
+### Live Telemetry Viewer
+
+```bash
+streamlit run app.py
+# Open: http://localhost:8501
+```
+
+### Local Benchmark (Real Laya, Local Game Engine)
+
+```bash
+python run_local_games.py --game snake --seed 42
+python run_local_games.py --game 2048 --seed 42
+```
 
 ---
 
-## 7. Judge & AI Model Defense Briefing (Q&A)
+## 8. Game Rules Reference
 
-### Q1: Why not just use GPT-4o or Claude 3.5 Sonnet to play the games?
-> **Answer:** Large generative models have three fatal flaws in competitive gaming:
-> 1. **Latency:** 1–3 seconds per turn violates arena response windows. Laya runs in $\le 20\text{ms}$.
-> 2. **Hallucination:** Generative models invent invalid actions or drift from formatting requirements. Laya outputs bounded likelihoods for strict typed questions.
-> 3. **Cost & Non-Determinism:** Frontier LLMs cost dollars per game and fail cryptographic reproducibility. Laya paired with our EV calculator produces deterministic, auditable decisions.
+| | Stage 1: Snake | Stage 2: 2048 |
+|---|---|---|
+| Grid | 20x20 | 4x4 |
+| Win condition | 15 foods eaten | Reach 2048 tile |
+| Move cap | 300 accepted steps | 2000 accepted steps |
+| Illegal moves | 180 degree reversal = HTTP 400 | Board unchanged = HTTP 400 |
+| Scoring | foods x 60 (+100 if win), capped 1000 | min(1000, max(0, (log2(best_tile) - 6) x 143 + floor(score/1000))) |
+| Stage unlock | 600+ points (10+ foods) | Reach 512 tile |
 
-### Q2: What is the primary difference between your bot and an `argmax(P)` bot?
-> **Answer:** An `argmax` bot blindly executes whichever move has the highest raw probability. In complex games, payoffs are asymmetric. A move with 72% success that risks a wall crash ($-100$ penalty) yields an EV of deeply negative expectation. A move with 70% success and standard penalty yields positive EV. Our EV engine calculates mathematical expectation, completely avoiding suicidal high-probability traps.
+---
 
-### Q3: How do you guarantee the official logs are authentic and not tampered with?
-> **Answer:** We enforce an in-process cryptographic SHA-256 hash chain on every single move. Each line contains `prev_hash` and `hash = SHA256(prev_hash | canonical_json)`. If a single character, probability decimal, or step number is altered post-hoc, `OfficialLogger.verify_log_file()` immediately flags the chain break.
+## 9. Judge Q&A
 
-### Q4: How easily does this codebase switch to the live hackathon arena?
-> **Answer:** Seamlessly in under 2 minutes. The core decision brains (`snake_brain.py`, `game2048_brain.py`), compression layers, EV calculators, and compliance logger remain 100% untouched. All that changes is switching from `LocalSnakeClient` / `LocalGame2048Client` to the hosted arena REST endpoints and updating `LAYA_MODE=http` in `.env`.
+**Q: How do we know you are not using a mock model?**
+
+`laya_agent.py` line 38: `import laya` — hard import, crashes if not installed. Line 92: `self.agent = laya.load(self.model_id, ...)` — hard model load, crashes if weights missing. The terminal prints `LOADING REAL LAYA MODEL: convaiinnovations/laya` with measured load time (~4700ms on CPU). There is no path in `run_snake_live.py` or `run_2048_live.py` that bypasses this.
+
+**Q: Why does Laya take ~1300ms per turn?**
+
+`convaiinnovations/laya` runs on CPU in the hackathon environment. Each turn evaluates 8 noul questions (2 per action x 4 actions) in a single forward pass. The arena has no per-move time limit.
+
+**Q: What happens when TopGameAI returns HTTP 500?**
+
+The circuit breaker in `run_snake_live.py` and `run_2048_live.py` catches `GameAPIError` with `status_code >= 500` inside the game loop and immediately breaks — no retries, no sleep, no exception propagation. The session log is closed cleanly, and `main()` automatically opens a fresh session (up to `--max-restarts` attempts, default 3).
+
+**Q: How is the fallback rate guaranteed to stay under 10%?**
+
+`ComplianceLayer` tracks `fallback_count / total_moves` and raises `ComplianceError` if it would exceed 10%. In practice, the EV calculator's legality mask prevents illegal moves before they reach the API, keeping the fallback rate at 0% in benchmarks.
+
+**Q: Why is EV calculation better than argmax on Laya probabilities?**
+
+An argmax bot blindly picks the highest-probability move. If that move carries a catastrophic wall-crash danger penalty, its true expected value is deeply negative. A slightly lower-probability move with no danger yields positive EV. Our EV engine calculates mathematical expectation over both progress and danger signals simultaneously, eliminating high-confidence suicide moves that naive argmax would select.

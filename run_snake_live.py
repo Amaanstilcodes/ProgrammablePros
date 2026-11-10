@@ -44,6 +44,77 @@ from snake_brain import (
 
 LEGAL_ACTIONS: list[str] = ["up", "down", "left", "right"]
 MAX_STEPS_SNAKE: int = 300
+_LEGAL_SET: frozenset[str] = frozenset(LEGAL_ACTIONS)
+
+# ─── Bar chart width for probability display ──────────────────────────────────
+_BAR_WIDTH: int = 12
+
+
+def _sanitize_action(action: str, fallback: str = "up") -> str:
+    """Task 1: Strip whitespace, lowercase, validate against legal set.
+
+    If result is not in {up, down, left, right} log a warning and return fallback.
+    """
+    cleaned = action.strip().lower()
+    if cleaned not in _LEGAL_SET:
+        print(
+            f"\n⚠️  [SANITIZER] ILLEGAL ACTION INTERCEPTED: {repr(action)} → "
+            f"forcing fallback '{fallback}'"
+        )
+        return fallback
+    return cleaned
+
+
+def print_decision_summary(
+    state: dict,
+    action_probs: dict[str, float],
+    chosen_action: str,
+    warnings: dict[str, str] | None = None,
+) -> None:
+    """Task 3: Hackathon-ready decision terminal block."""
+    # --- extract state fields defensively ---
+    snake = state.get("snake", [])
+    head = snake[0] if snake else state.get("head", "?")
+    food = state.get("food", "?")
+    direction = state.get("direction", "?").upper()
+    length = len(snake) if snake else state.get("length", "?")
+
+    W = 56  # total box width (inner)
+    border = "─" * W
+
+    print(f"\n┌{border}┐")
+    print(f"│{'  🐍  LAYA DECISION BLOCK':^{W}}│")
+    print(f"├{border}┤")
+    # State
+    print(f"│  {'HEAD':8s}: {str(head):<{W-12}}│")
+    print(f"│  {'FOOD':8s}: {str(food):<{W-12}}│")
+    print(f"│  {'DIR':8s}: {str(direction):<{W-12}}│")
+    print(f"│  {'LENGTH':8s}: {str(length):<{W-12}}│")
+    print(f"├{border}┤")
+    print(f"│{'  LAYA PROBABILITIES':^{W}}│")
+    print(f"├{border}┤")
+
+    max_prob = max(action_probs.values()) if action_probs else 1.0
+    for act in LEGAL_ACTIONS:
+        prob = action_probs.get(act, 0.0)
+        filled = int(round(_BAR_WIDTH * prob / max(max_prob, 1e-9)))
+        bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+        marker = " ◄" if act == chosen_action else ""
+        pct = f"{prob * 100:5.1f}%"
+        print(f"│  [{bar}] {act:<5s}: {pct}{marker:<2}{'':>{W-32}}│")
+
+    print(f"├{border}┤")
+    chosen_line = f"🎯 CHOSEN ACTION: {chosen_action.upper()}"
+    print(f"│{'  ' + chosen_line:^{W}}│")
+
+    if warnings:
+        print(f"├{border}┤")
+        for act, msg in warnings.items():
+            warn_line = f"⚠️  {msg}"
+            # wrap to box width
+            print(f"│  {warn_line[:W-4]:<{W-2}}│")
+
+    print(f"└{border}┘\n")
 
 
 def run_live_snake_session(
@@ -144,6 +215,14 @@ def run_live_snake_session(
             else:
                 compressor.clear_failure()
 
+            # Task 3: Rich decision terminal output
+            print_decision_summary(
+                state=state_before,
+                action_probs=action_probs,
+                chosen_action=final_action,
+                warnings=laya_engine.get_last_warnings(),
+            )
+
             # Record action in EV history for repeat-penalty tracking
             ev_calc.record_move(final_action)
 
@@ -160,13 +239,27 @@ def run_live_snake_session(
                 source=source,
             )
 
-            # I. Dispatch Move to the REAL TopGameAI Arena
+            # Task 1: Strict action sanitization — guard against Laya hallucinating illegal strings
+            current_direction = state_before.get("direction", "up")
+            final_action = _sanitize_action(final_action, fallback=current_direction or "up")
+
+            # Circuit-breaker: instant abort on HTTP 500 (session dead server-side)
             api_start = time.perf_counter()
-            move_res: MoveResult = client.send_move(
-                session_id=session_id,
-                action=final_action,
-                state_before=state_before,
-            )
+            try:
+                move_res: MoveResult = client.send_move(
+                    session_id=session_id,
+                    action=final_action,
+                    state_before=state_before,
+                )
+            except GameAPIError as _ge:
+                if _ge.status_code >= 500:
+                    print(
+                        f"[!] FATAL: Session corrupted on server (HTTP {_ge.status_code}). "
+                        "Aborting this session to prevent infinite loops."
+                    )
+                    game_over = True
+                    break
+                raise  # propagate 400, 404, etc.
             api_ms = (time.perf_counter() - api_start) * 1000.0
             turn_ms = (time.perf_counter() - turn_start) * 1000.0
 
@@ -256,20 +349,41 @@ def main() -> int:
     parser.add_argument("--agent-name", default="ProgrammablePros", help="Agent name")
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS_SNAKE, help="Maximum steps (cap 300)")
     parser.add_argument("--log-dir", default="logs/snake", help="Log output directory")
+    parser.add_argument("--max-restarts", type=int, default=3, help="Max auto-restarts on dead session (HTTP 500)")
     args = parser.parse_args()
 
-    try:
-        run_live_snake_session(
-            agent_name=args.agent_name,
-            max_steps=args.max_steps,
-            log_dir=args.log_dir,
-        )
-        return 0
-    except Exception as exc:
-        print(f"\n[!] RUNNER FAILED: {exc}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
-        return 1
+    import traceback
+    for _run in range(args.max_restarts):
+        attempt_label = f"[Run {_run + 1}/{args.max_restarts}]"
+        print(f"\n{attempt_label} Starting Snake session...")
+        try:
+            run_live_snake_session(
+                agent_name=args.agent_name,
+                max_steps=args.max_steps,
+                log_dir=args.log_dir,
+            )
+            return 0  # clean exit on success
+        except GameAPIError as exc:
+            if exc.status_code >= 500 and _run < args.max_restarts - 1:
+                _restart_wait = 10
+                print(
+                    f"\n{attempt_label} Session died with HTTP {exc.status_code}. "
+                    f"Auto-restarting in {_restart_wait}s — opening fresh session...",
+                    file=sys.stderr,
+                )
+                time.sleep(_restart_wait)
+                # continue to next _run iteration
+            else:
+                print(f"\n[!] RUNNER FAILED after {_run + 1} attempt(s): {exc}", file=sys.stderr)
+                traceback.print_exc()
+                return 1
+        except Exception as exc:
+            print(f"\n[!] RUNNER FAILED: {exc}", file=sys.stderr)
+            traceback.print_exc()
+            return 1
+
+    print(f"[!] All {args.max_restarts} session attempts exhausted.", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

@@ -138,7 +138,7 @@ def _build_retry_session(retries: int = 3, backoff: float = 0.5) -> requests.Ses
     retry_strategy = Retry(
         total=retries,
         backoff_factor=backoff,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=[429, 502, 503, 504],
         allowed_methods=["GET", "POST"],
         raise_on_status=False,
     )
@@ -269,6 +269,16 @@ class BaseGameClient:
             except Exception:
                 err_data = {"error": resp.text}
             return 400, err_data, api_ms, request_id
+
+        if resp.status_code >= 500:
+            print("\n" + "!" * 80)
+            print(f"[HTTP {resp.status_code}] SERVER ERROR — DIAGNOSTIC DUMP")
+            print(f"  URL     : {target_url}")
+            print(f"  PAYLOAD : {json.dumps(payload)}")
+            print(f"  BODY    : {repr(resp.text)}")
+            print(f"  HEADERS : {dict(resp.headers)}")
+            print("!" * 80 + "\n")
+            raise GameAPIError(resp.status_code, target_url, resp.text)
 
         if resp.status_code >= 400:
             raise GameAPIError(resp.status_code, target_url, resp.text)
