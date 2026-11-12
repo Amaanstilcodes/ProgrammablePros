@@ -93,7 +93,23 @@ st.markdown(
     .fallback-bar-ok   { height: 100%; background: linear-gradient(90deg,#4ade80,#22d3ee); border-radius: 4px; }
     .fallback-bar-warn { height: 100%; background: linear-gradient(90deg,#fb923c,#f87171); border-radius: 4px; }
     section[data-testid="stSidebar"] { background: #080b12; border-right: 1px solid rgba(255,255,255,0.05); }
-    #MainMenu { visibility: hidden; } footer { visibility: hidden; } header { visibility: hidden; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    header { background: transparent !important; }
+    [data-testid="stSidebarCollapsedControl"] {
+        display: flex !important;
+        background: #0f172a !important;
+        border: 1px solid rgba(56,189,248,0.3) !important;
+        border-radius: 8px !important;
+        color: #38bdf8 !important;
+    }
+    .ctrl-deck {
+        background: linear-gradient(145deg, #0d1527, #0b1120);
+        border: 1px solid rgba(56,189,248,0.2);
+        border-radius: 12px;
+        padding: 14px 18px;
+        margin-bottom: 18px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -234,10 +250,10 @@ def render_kpi_row(entries: list[dict], latest: dict, state: dict, game: str) ->
     st.markdown(
         f"""<div class="kpi-grid">
           <div class="kpi-card"><div class="kpi-label">Session</div><div class="kpi-value" style="font-size:1rem;">{session_short}</div></div>
-          <div class="kpi-card"><div class="kpi-label">Step</div><div class="kpi-value">{step}</div><div class="kpi-sub">{applied} applied · {rejected} rejected</div></div>
+          <div class="kpi-card"><div class="kpi-label">Step</div><div class="kpi-value">{step} <span style="font-size:0.8rem;color:#64748b;">/ {len(entries)}</span></div><div class="kpi-sub">{applied} applied · {rejected} rejected</div></div>
           <div class="kpi-card"><div class="kpi-label">Score</div><div class="kpi-value" style="color:#38bdf8;">{score}</div></div>
           <div class="kpi-card"><div class="kpi-label">{extra_label}</div><div class="kpi-value" style="color:#4ade80;">{extra_val}</div><div class="kpi-sub">{extra_sub}</div></div>
-          <div class="kpi-card"><div class="kpi-label">Last Move</div><div class="kpi-value" style="font-size:1.1rem;color:#a78bfa;">{action}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Move</div><div class="kpi-value" style="font-size:1.1rem;color:#a78bfa;">{action}</div></div>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -363,37 +379,116 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    with st.sidebar:
-        st.markdown("<div style='font-size:1rem;font-weight:700;color:#f1f5f9;margin-bottom:14px;'>⚙️ Session Inspector</div>", unsafe_allow_html=True)
-        if not all_files:
-            st.warning("No log files found in logs/ directory.")
-            st.info("Run a game to generate a session log.")
-            return
+    if not all_files:
+        st.warning("No log files found in logs/ directory.")
+        st.info("Run a game using run_local_games.py to generate a session log.")
+        return
+
+    # ── MAIN PAGE CONTROL DECK ──
+    st.markdown("<div class='section-title'>🎮 Session & Playback Controller</div>", unsafe_allow_html=True)
+
+    col_sel, col_mode = st.columns([3, 1.2])
+    with col_sel:
         selected_file = st.selectbox(
-            "Log file",
+            "Select Game Session Log:",
             all_files,
-            format_func=lambda p: f"{'\U0001f40d' if 'snake' in str(p) else '\U0001f7e2'} {p.name}",
+            format_func=lambda p: f"{'🐍 Snake' if 'snake' in str(p) else '🔢 2048'} — {p.name}",
+            label_visibility="collapsed",
         )
-        auto_refresh = st.checkbox("? Auto-refresh (1s)", value=True)
-        st.markdown("---")
-        st.caption(f"📁 {selected_file.parent.name}/{selected_file.name}")
-        st.caption(f"📦 {selected_file.stat().st_size // 1024} KB")
+    with col_mode:
+        if "live_mode" not in st.session_state:
+            st.session_state["live_mode"] = True
+
+        live_active = st.session_state["live_mode"]
+        btn_live_label = "🟢 LIVE TRACKING (ON)" if live_active else "⚪ LIVE TRACKING (OFF)"
+        if st.button(btn_live_label, use_container_width=True):
+            st.session_state["live_mode"] = not st.session_state["live_mode"]
+            if st.session_state["live_mode"]:
+                st.session_state["is_playing"] = False
+            st.rerun()
 
     entries = load_log_entries(selected_file)
     if not entries:
         st.warning(f"Log `{selected_file.name}` is empty — waiting for game data…")
-        if auto_refresh:
-            time.sleep(1)
+        if st.session_state.get("live_mode", True):
+            time.sleep(0.5)
             st.rerun()
         return
 
-    latest   = entries[-1]
-    game     = latest.get("game", "snake")
-    state    = latest.get("state_after", latest.get("state_before", {}))
-    decision = latest.get("decision", {})
-    timing   = latest.get("timing",   {})
+    total_steps = len(entries)
 
-    render_kpi_row(entries, latest, state, game)
+    # Initialize session state for playback
+    if "is_playing" not in st.session_state:
+        st.session_state["is_playing"] = False
+
+    file_key = str(selected_file)
+    if st.session_state.get("active_file") != file_key:
+        st.session_state["active_file"] = file_key
+        st.session_state["current_step"] = total_steps
+        st.session_state["live_mode"] = True
+        st.session_state["is_playing"] = False
+
+    # In live mode, always snap to latest step unless user is manually playing/scrubbing
+    if st.session_state["live_mode"] and not st.session_state["is_playing"]:
+        st.session_state["current_step"] = total_steps
+
+    st.session_state["current_step"] = min(max(1, st.session_state.get("current_step", total_steps)), total_steps)
+
+    col_play, col_prev, col_next, col_spd = st.columns([1.2, 1, 1, 1.4])
+    with col_play:
+        play_label = "⏸️ Pause" if st.session_state["is_playing"] else "▶️ Play Replay"
+        if st.button(play_label, use_container_width=True):
+            st.session_state["is_playing"] = not st.session_state["is_playing"]
+            st.session_state["live_mode"] = False
+            if st.session_state["is_playing"] and st.session_state["current_step"] >= total_steps:
+                st.session_state["current_step"] = 1
+            st.rerun()
+
+    with col_prev:
+        if st.button("◀️ Step Back", use_container_width=True):
+            st.session_state["current_step"] = max(1, st.session_state["current_step"] - 1)
+            st.session_state["live_mode"] = False
+            st.session_state["is_playing"] = False
+            st.rerun()
+
+    with col_next:
+        if st.button("Step Fwd ▶️", use_container_width=True):
+            st.session_state["current_step"] = min(total_steps, st.session_state["current_step"] + 1)
+            st.session_state["live_mode"] = (st.session_state["current_step"] >= total_steps)
+            st.session_state["is_playing"] = False
+            st.rerun()
+
+    with col_spd:
+        speed_map = {"Fast (0.05s)": 0.05, "Normal (0.15s)": 0.15, "Slow (0.4s)": 0.4}
+        speed_sel = st.selectbox("Playback Speed", list(speed_map.keys()), index=1, label_visibility="collapsed")
+        playback_delay = speed_map[speed_sel]
+
+    # Main Step Slider
+    cur_step = st.session_state["current_step"]
+    pct = (cur_step / total_steps * 100) if total_steps else 100
+    slider_label = f"Step Timeline: Move {cur_step} of {total_steps} ({pct:.0f}% played)"
+    new_step = st.slider(slider_label, min_value=1, max_value=max(1, total_steps), value=cur_step)
+    if new_step != cur_step and not st.session_state["is_playing"]:
+        st.session_state["current_step"] = new_step
+        st.session_state["live_mode"] = (new_step >= total_steps)
+        st.rerun()
+
+    # Mirror into sidebar too, for convenience if sidebar is opened
+    with st.sidebar:
+        st.markdown("<div style='font-size:1rem;font-weight:700;color:#f1f5f9;margin-bottom:14px;'>⚙️ Session Info</div>", unsafe_allow_html=True)
+        st.caption(f"📁 Log: `{selected_file.name}`")
+        st.caption(f"📦 Size: {selected_file.stat().st_size // 1024} KB")
+        st.caption(f"📊 Total Moves: {total_steps}")
+        st.caption(f"⏱️ Active Step: {cur_step}")
+
+    active_idx = min(max(1, st.session_state["current_step"]), total_steps) - 1
+    current_entry = entries[active_idx]
+    game     = current_entry.get("game", "snake")
+    state    = current_entry.get("state_after", current_entry.get("state_before", {}))
+    decision = current_entry.get("decision", {})
+    timing   = current_entry.get("timing",   {})
+
+    render_kpi_row(entries, current_entry, state, game)
     render_status_strip(entries, selected_file, decision)
 
     col_board, col_right = st.columns([1.15, 0.85], gap="medium")
@@ -463,8 +558,16 @@ def main() -> None:
     with st.expander("📋 Full Step-by-Step Audit Feed (SHA-256 Hash Chain)", expanded=False):
         render_audit_table(entries)
 
-    if auto_refresh:
-        time.sleep(1)
+    if st.session_state.get("is_playing", False):
+        if st.session_state["current_step"] < len(entries):
+            st.session_state["current_step"] += 1
+            time.sleep(playback_delay)
+            st.rerun()
+        else:
+            st.session_state["is_playing"] = False
+            st.rerun()
+    elif st.session_state.get("live_mode", True):
+        time.sleep(0.3)
         st.rerun()
 
 

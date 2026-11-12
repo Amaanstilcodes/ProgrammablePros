@@ -89,6 +89,17 @@ def compute_chain_score(board: List[List[int]]) -> int:
     return score
 
 
+class Board2048SubgoalManager:
+    """Deterministic priority cascade for 2048 subgoals."""
+
+    def get_current_subgoal(self, state: Dict[str, Any]) -> str:
+        parsed = parse_2048_state(state)
+        empty_count = parsed.get("empty_count", 0)
+        if empty_count <= 2:
+            return "creating empty space and merging to survive"
+        return "keeping the largest tile in the bottom-left corner and merging along the bottom row and left column"
+
+
 class Board2048Compressor:
     """Compresses 2048 game state into a dense prompt string (<= 200 chars).
 
@@ -318,6 +329,7 @@ class Board2048EVCalculator:
 
 __all__ = [
     "Board2048Compressor",
+    "Board2048SubgoalManager",
     "Board2048HypothesisBuilder",
     "Board2048EVCalculator",
     "compute_chain_score",

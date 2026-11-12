@@ -58,13 +58,10 @@ def score_hypotheses_with_laya(
     return raw_probs
 
 
-def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) -> tuple[str, bool, dict[str, Any]]:
+def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True, delay: float = 0.0) -> tuple[str, bool, dict[str, Any]]:
     """Run a single game session to completion using the real Laya backend in project."""
     log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
-    logger = OfficialLogger(log_dir=str(log_dir))
-    compliance = ComplianceLayer()
-
     logger = OfficialLogger(log_dir=str(log_dir))
     compliance = ComplianceLayer()
 
@@ -118,7 +115,22 @@ def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) 
         subgoal = subgoal_mgr.get_current_subgoal(state)
 
         # c. Build 8 typed hypotheses
-        questions = hypo_builder.build_hypotheses(state, subgoal, compressed)
+        if game == "snake":
+            questions = [
+                f"Context: {compressed}. Hypothesis: Moving '{a}' is legal and progresses toward {subgoal}. What is the calibrated probability (0.0 to 1.0) that this is true?"
+                if i % 2 == 0 else
+                f"Context: {compressed}. Hypothesis: Moving '{a}' causes immediate collision with wall or body. What is the calibrated probability (0.0 to 1.0) that this is true?"
+                for a in ("up", "down", "left", "right")
+                for i in range(2)
+            ]
+        else:
+            questions = [
+                f"Context: {compressed}. Hypothesis: Sliding '{a}' changes the board and progresses toward {subgoal}. What is the calibrated probability (0.0 to 1.0) that this is true?"
+                if i % 2 == 0 else
+                f"Context: {compressed}. Hypothesis: Sliding '{a}' leaves the board with <= 1 empty cell and no merges, risking game over. What is the calibrated probability (0.0 to 1.0) that this is true?"
+                for a in ("up", "down", "left", "right")
+                for i in range(2)
+            ]
 
         # d. Query Laya Model (NO hardcoded values)
         t_laya0 = time.perf_counter()
@@ -126,7 +138,10 @@ def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) 
         laya_ms = (time.perf_counter() - t_laya0) * 1000.0
 
         # e. Calculate EV using Laya probabilities
-        proposed_action, ev_breakdown = ev_calc.calculate(state, raw_probs, subgoal)
+        if game == "snake":
+            proposed_action, ev_breakdown = ev_calc.calculate(state, raw_probs, subgoal=subgoal)
+        else:
+            proposed_action, ev_breakdown = ev_calc.calculate(state, raw_probs)
 
         # f. Check safety fallback
         final_action = proposed_action
@@ -137,6 +152,16 @@ def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) 
                 final_action = fallback
                 source = "fallback"
                 fallback_count += 1
+        elif game == "2048":
+            current_b = state.get("board", [[0] * 4 for _ in range(4)])
+            simulated_b = Board2048EVCalculator.simulate_slide_board(current_b, proposed_action)
+            if simulated_b == current_b:
+                for alt_a in ("left", "down", "up", "right"):
+                    if Board2048EVCalculator.simulate_slide_board(current_b, alt_a) != current_b:
+                        final_action = alt_a
+                        source = "fallback"
+                        fallback_count += 1
+                        break
 
         t_decide = (time.perf_counter() - t_start) * 1000.0
 
@@ -206,6 +231,9 @@ def run_session(game: str, seed: int | None = None, use_mock_laya: bool = True) 
 
         state = state_after
 
+        if delay > 0:
+            time.sleep(delay)
+
     # Finalize session
     client.close()
     logger.save_final_state(session_id, state)
@@ -246,10 +274,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--real-laya", action="store_true", default=False, help="Use real in-process Laya neural model")
     parser.add_argument("--use-mock-laya", action="store_true", default=False, help="Use mock Laya evaluator")
+    parser.add_argument("--delay", type=float, default=0.0, help="Delay in seconds between moves for live visualization (e.g. 0.1)")
     args = parser.parse_args()
 
     use_mock = not args.real_laya
-    session_id, is_valid, summary = run_session(game=args.game, seed=args.seed, use_mock_laya=use_mock)
+    session_id, is_valid, summary = run_session(game=args.game, seed=args.seed, use_mock_laya=use_mock, delay=args.delay)
     if not is_valid:
         print(f"FAILED: Hash chain verification failed for {session_id}")
         sys.exit(1)
